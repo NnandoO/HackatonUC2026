@@ -209,3 +209,43 @@ Propietaria envía foto por WhatsApp → sistema prepara el producto → propiet
 - Desarrollo a largo plazo: **Paperclip + Claude Code/Codex**, con GitHub como repositorio y control de versiones.
 - Operación de Angibell: **NestJS + agente comercial por WhatsApp**.
 - Jev: optimizador posterior para clasificar mensajes a menor costo.
+
+---
+
+# Arquitectura del sistema (diagrama)
+
+```mermaid
+flowchart LR
+  CW[Cliente web] --> NEXT[Next.js tienda]
+  PP[Propietaria panel] --> NEXT
+  CF[Cloudflare dominio y DNS] --> NEXT
+  NEXT --> API[NestJS API / Webhooks]
+
+  WAC[WhatsApp clientes] --> META[Meta WhatsApp Cloud API]
+  WAP[WhatsApp propietaria] --> META
+  META --> API
+
+  API <--> DB[(PostgreSQL)]
+  API <--> S3[(S3 Imágenes)]
+  API <--> IA[Motor IA + herramientas seguras]
+  API <--> PAY[Pasarela de pagos]
+  API <--> Q[Cola de tareas]
+
+  PAY --> CAT[Meta catálogo/publicaciones]
+  Q --> CAT
+  Q --> DEL[Coordinación delivery]
+```
+
+Flujo y responsabilidades:
+
+1. **Entrada web:** Cliente web, panel de la propietaria y Cloudflare (dominio + DNS) pasan por **Next.js (tienda + panel)** → **NestJS API**.
+2. **Entrada WhatsApp:** los WhatsApp de **clientes** y de la **propietaria** entran por la **Meta WhatsApp Cloud API** → **NestJS API / Webhooks** (única entrada oficial, con reglas de plantillas y ventana de atención).
+3. **Núcleo comercial (NestJS):** único punto que valida y ejecuta. Se conecta bidireccionalmente con:
+   - **PostgreSQL** — datos de negocio (productos, variantes, stock, pedidos, clientes, conversaciones).
+   - **S3 Imágenes** — fotos de productos y assets.
+   - **Motor IA + herramientas seguras** — el modelo interpreta; solo accede por herramientas restringidas; nunca decide precios, stock ni pagos por sí solo.
+   - **Pasarela de pagos** — Culqi; el pago se confirma solo con la verificación del webhook en el backend.
+   - **Cola de tareas** — BullMQ; procesos asíncronos con reintentos (publicaciones, notificaciones, delivery).
+4. **Salidas asíncronas:** la **Cola de tareas** alimenta **Meta catálogo/publicaciones** (sincronización y publicaciones aprobadas) y la **Coordinación de delivery**.
+
+La IA nunca toca la base de datos, la pasarela ni Meta directamente: todo pasa por el API con permisos, validación y auditoría.
