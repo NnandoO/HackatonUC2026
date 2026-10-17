@@ -5,6 +5,10 @@ import crypto from 'node:crypto';
 const WPP_BASE_URL = process.env.WPPCONNECT_BASE_URL || 'http://127.0.0.1:21465';
 const SECRET_KEY = process.env.WPPCONNECT_SECRET_KEY || 'f3d03d5856e6ab6b5a200ec5448bf7ba9a354870fafc74fc';
 const SESSION_NAME = 'angibell';
+const GROQ_API_KEY = process.env.GROQ_API_KEY || 'REDACTED_GROQ_KEY';
+
+const DEBOUNCE_WAIT_MS = 3500;    // Ventana de silencio: espera 3.5s tras el último mensaje
+const MAX_BUFFER_WAIT_MS = 10000; // Límite máximo de espera en ráfaga: 10 segundos
 
 export class WppConnectService {
   token = null;
@@ -12,6 +16,7 @@ export class WppConnectService {
   processedMsgIds = new Set();
   sentByBotIds = new Set();
   phoneQueues = new Map();
+  userBuffers = new Map();
 
   sleep(ms) {
     return new Promise(resolve => setTimeout(resolve, ms));
@@ -175,8 +180,122 @@ export class WppConnectService {
     }
   }
 
+  async downloadMedia(msgId) {
+    const token = await this.getToken();
+    if (!token) return null;
+    try {
+      const res = await fetch(`${WPP_BASE_URL}/api/${SESSION_NAME}/download-media`, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${token}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({ messageId: msgId })
+      });
+      const data = await res.json();
+      if (data && data.response) {
+        return data.response;
+      }
+    } catch (err) {
+      console.error(`Error descargando media para ${msgId}:`, err.message);
+    }
+    return null;
+  }
+
+  async transcribeAudio(mediaData) {
+    try {
+      if (!mediaData) return null;
+      let base64 = mediaData;
+      if (typeof mediaData === 'string' && mediaData.includes(',')) {
+        base64 = mediaData.split(',')[1];
+      }
+      const audioBuffer = Buffer.from(base64, 'base64');
+      if (audioBuffer.length < 50) return null;
+
+      const formData = new FormData();
+      formData.append('file', new Blob([audioBuffer], { type: 'audio/ogg' }), 'audio.ogg');
+      formData.append('model', 'whisper-large-v3-turbo');
+      formData.append('language', 'es');
+      formData.append('response_format', 'json');
+
+      const res = await fetch('https://api.groq.com/openai/v1/audio/transcriptions', {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${GROQ_API_KEY}`
+        },
+        body: formData
+      });
+
+      if (!res.ok) {
+        const errText = await res.text();
+        console.error('Error de transcripción Groq Whisper:', res.status, errText);
+        return null;
+      }
+
+      const data = await res.json();
+      return data.text ? data.text.trim() : null;
+    } catch (err) {
+      console.error('Error en proceso de transcripción de audio:', err.message);
+      return null;
+    }
+  }
+
+  pushToBuffer(senderPhone, text, isSelf) {
+    // 1. Enviar 'visto' de inmediato para acuse de recibo natural
+    this.sendSeen(senderPhone);
+
+    const now = Date.now();
+    let entry = this.userBuffers.get(senderPhone);
+
+    if (!entry) {
+      console.log(`📥 [Buffer] Nuevo hilo de mensajes para +${senderPhone}. Ventana de silencio iniciada (${DEBOUNCE_WAIT_MS / 1000}s)...`);
+      entry = {
+        senderPhone,
+        isSelf,
+        messages: [text],
+        firstReceivedAt: now,
+        timer: null
+      };
+      entry.timer = setTimeout(() => this.flushBuffer(senderPhone), DEBOUNCE_WAIT_MS);
+      this.userBuffers.set(senderPhone, entry);
+    } else {
+      entry.messages.push(text);
+      const elapsed = now - entry.firstReceivedAt;
+      console.log(`📥 [Buffer] Mensaje acumulado de +${senderPhone} (${entry.messages.length} mensajes). Tiempo en ráfaga: ${elapsed}ms`);
+
+      if (elapsed < MAX_BUFFER_WAIT_MS) {
+        clearTimeout(entry.timer);
+        entry.timer = setTimeout(() => this.flushBuffer(senderPhone), DEBOUNCE_WAIT_MS);
+      } else {
+        console.log(`⏳ [Buffer] Límite de ráfaga alcanzado (${MAX_BUFFER_WAIT_MS / 1000}s) para +${senderPhone}. Procesando en el siguiente tick.`);
+      }
+    }
+  }
+
+  async flushBuffer(senderPhone) {
+    const entry = this.userBuffers.get(senderPhone);
+    if (!entry) return;
+    this.userBuffers.delete(senderPhone);
+
+    const combinedText = entry.messages.join('\n');
+    console.log(`\n======================================================`);
+    console.log(`🚀 [Buffer Flush] Ráfaga completa lista para responder a +${senderPhone}:`);
+    console.log(`• Total mensajes unificados: ${entry.messages.length}`);
+    console.log(`• Contenido consolidado:\n${combinedText}`);
+    console.log(`======================================================`);
+
+    // Procesar en la cola secuencial por número con Anti-Ban
+    const prevQueue = this.phoneQueues.get(senderPhone) || Promise.resolve();
+    const currentTask = prevQueue.then(async () => {
+      await this.processMessageWithHumanizer(senderPhone, combinedText, entry.isSelf);
+    }).catch(err => {
+      console.error(`Error procesando ráfaga unificada de +${senderPhone}:`, err);
+    });
+    this.phoneQueues.set(senderPhone, currentTask);
+  }
+
   async handleIncomingMessage(msg) {
-    if (!msg || !msg.body) return;
+    if (!msg) return;
 
     const msgId = typeof msg.id === 'object' ? msg.id._serialized : msg.id;
     if (!msgId || this.processedMsgIds.has(msgId) || this.sentByBotIds.has(msgId)) {
@@ -186,7 +305,6 @@ export class WppConnectService {
     if (this.processedMsgIds.size > 2000) this.processedMsgIds.clear();
 
     const senderPhone = (msg.from || '').replace('@c.us', '').replace('@lid', '');
-    const text = msg.body.trim();
 
     // Si el mensaje es saliente hacia otra persona (no auto-chat), ignorar
     const isSelf = msg.to === msg.from || (msg.chatId && (msg.chatId.includes('51995992450') || msg.chatId.includes('152875737075771')));
@@ -194,29 +312,47 @@ export class WppConnectService {
       return;
     }
 
-    // Cola por número para procesar en orden y evitar que llamadas simultáneas se atropellen
-    const prevQueue = this.phoneQueues.get(senderPhone) || Promise.resolve();
-    const currentTask = prevQueue.then(async () => {
-      await this.processMessageWithHumanizer(senderPhone, text, isSelf);
-    }).catch(err => {
-      console.error(`Error procesando mensaje de +${senderPhone}:`, err);
-    });
-    this.phoneQueues.set(senderPhone, currentTask);
+    // Omitir imágenes y videos según requerimiento expreso ("imágenes no")
+    const isImageOrVideo = msg.type === 'image' || msg.type === 'video' || msg.type === 'sticker' ||
+      (msg.mimetype && (msg.mimetype.startsWith('image') || msg.mimetype.startsWith('video')));
+    if (isImageOrVideo) {
+      console.log(`🖼️ [WppConnect] Imagen/video recibido de +${senderPhone} omitido (soporte visual no activo).`);
+      return;
+    }
+
+    // Detección de notas de voz / audio
+    const isAudio = msg.type === 'ptt' || msg.type === 'audio' || (msg.mimetype && msg.mimetype.startsWith('audio'));
+
+    let text = '';
+    if (isAudio) {
+      console.log(`🎙️ [Audio WhatsApp] Nota de voz detectada de +${senderPhone} (msgId: ${msgId}). Transcribiendo...`);
+      let mediaData = (msg.body && typeof msg.body === 'string' && msg.body.startsWith('data:audio')) ? msg.body : await this.downloadMedia(msgId);
+      const transcription = await this.transcribeAudio(mediaData);
+
+      if (transcription) {
+        console.log(`🎙️ [Audio WhatsApp Transcrito]: "${transcription}"`);
+        text = `[Nota de voz]: "${transcription}"`;
+      } else {
+        console.log(`🎙️ [Audio WhatsApp]: Inaudible o error en descarga.`);
+        text = `[Nota de voz inaudible o en silencio]`;
+      }
+    } else {
+      text = (msg.body || '').trim();
+    }
+
+    if (!text) return;
+
+    // Agregar a la cola de buffer / debouncer (evita responder mensaje por mensaje)
+    this.pushToBuffer(senderPhone, text, isSelf);
   }
 
   async processMessageWithHumanizer(senderPhone, text, isSelf) {
-    console.log(`\n======================================================`);
-    console.log(`[WHATSAPP REAL RECIBIDO]`);
-    console.log(`• Remitente: +${senderPhone}`);
-    console.log(`• Mensaje: "${text}"`);
-    console.log(`======================================================`);
-
-    // 1. Anti-Ban: Pausa de lectura natural humana (1.2s - 2.2s)
+    // 1. Anti-Ban: Pausa de lectura natural humana (1.2s - 2.1s)
     const readPauseMs = 1200 + Math.floor(Math.random() * 900);
     console.log(`⏱️ [Anti-Ban] Pausa de lectura humana: ${readPauseMs}ms...`);
     await this.sleep(readPauseMs);
 
-    // 2. Anti-Ban: Reportar presencia online y visto en WhatsApp
+    // 2. Anti-Ban: Reportar presencia online y visto
     await this.setOnlinePresence(true);
     await this.sendSeen(senderPhone);
 
@@ -241,16 +377,15 @@ export class WppConnectService {
       conv = { id: convId };
     }
 
-    // 4. Procesar con el Agente de OpenRouter
-    console.log(`🤖 [Anti-Ban] Consultando OpenRouter Agent...`);
+    // 4. Procesar con el Agente de OpenRouter (análisis unificado de la ráfaga)
+    console.log(`🤖 [Anti-Ban] Consultando OpenRouter Agent para ráfaga unificada...`);
     const chatResult = await chatService.postMessage(conv.id, actor.id, { text, imageUrls: [] }, role);
     const replyText = chatResult.message.text;
 
-    // 5. Anti-Ban: Simular indicador "Escribiendo..." con tiempo proporcional a la respuesta
-    // Velocidad de tecleo humana realista: ~25ms por carácter (mínimo 2.4s, máximo 6.0s)
+    // 5. Anti-Ban: Simular indicador "Escribiendo..." proporcional a la respuesta
     const typingMs = Math.min(6000, Math.max(2400, Math.floor(replyText.length * 25 + (Math.random() * 800 - 400))));
     console.log(`✍️ [Anti-Ban] Indicador "Escribiendo..." activo por ${typingMs}ms (${replyText.length} caracteres)...`);
-    
+
     await this.setTyping(senderPhone, true);
     await this.sleep(typingMs);
     await this.setTyping(senderPhone, false);
@@ -259,8 +394,8 @@ export class WppConnectService {
     const jitterMs = 300 + Math.floor(Math.random() * 300);
     await this.sleep(jitterMs);
 
-    // 7. Envío del mensaje
-    console.log(`[WHATSAPP REAL ENVIANDO RESPUESTA A +${senderPhone}]:\n"${replyText.slice(0, 100)}..."\n`);
+    // 7. Envío del mensaje consolidado
+    console.log(`[WHATSAPP REAL ENVIANDO RESPUESTA UNIFICADA A +${senderPhone}]:\n"${replyText.slice(0, 120)}..."\n`);
     await this.sendMessage(senderPhone, replyText);
   }
 
@@ -322,7 +457,6 @@ export class WppConnectService {
   }
 
   startPolling() {
-    // Iniciar el listener de Socket.IO en tiempo real
     this.connectSocketListener();
   }
 }
