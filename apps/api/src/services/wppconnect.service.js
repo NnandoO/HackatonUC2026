@@ -11,6 +11,11 @@ export class WppConnectService {
   ws = null;
   processedMsgIds = new Set();
   sentByBotIds = new Set();
+  phoneQueues = new Map();
+
+  sleep(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms));
+  }
 
   async getToken() {
     if (this.token) return this.token;
@@ -82,6 +87,62 @@ export class WppConnectService {
     return { connected: false, qrcode: null, message: 'Inicializando WhatsApp Web... reintenta en 3 segundos' };
   }
 
+  async setOnlinePresence(online = true) {
+    const token = await this.getToken();
+    if (!token) return;
+    try {
+      await fetch(`${WPP_BASE_URL}/api/${SESSION_NAME}/set-online-presence`, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${token}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({ presence: Boolean(online) })
+      });
+    } catch (err) {
+      // Ignorar fallas silenciosas en presencia
+    }
+  }
+
+  async sendSeen(phone) {
+    const token = await this.getToken();
+    if (!token) return;
+    const cleanPhone = phone.replace(/[^0-9]/g, '');
+    try {
+      await fetch(`${WPP_BASE_URL}/api/${SESSION_NAME}/send-seen`, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${token}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({ phone: cleanPhone })
+      });
+    } catch (err) {
+      // Ignorar si el número es self-chat o no admite vistos
+    }
+  }
+
+  async setTyping(phone, value = true) {
+    const token = await this.getToken();
+    if (!token) return;
+    const cleanPhone = phone.replace(/[^0-9]/g, '');
+    try {
+      await fetch(`${WPP_BASE_URL}/api/${SESSION_NAME}/typing`, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${token}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          phone: cleanPhone,
+          value: Boolean(value)
+        })
+      });
+    } catch (err) {
+      // Ignorar si el número es self-chat
+    }
+  }
+
   async sendMessage(phone, message) {
     const token = await this.getToken();
     const cleanPhone = phone.replace(/[^0-9]/g, '');
@@ -133,13 +194,33 @@ export class WppConnectService {
       return;
     }
 
+    // Cola por número para procesar en orden y evitar que llamadas simultáneas se atropellen
+    const prevQueue = this.phoneQueues.get(senderPhone) || Promise.resolve();
+    const currentTask = prevQueue.then(async () => {
+      await this.processMessageWithHumanizer(senderPhone, text, isSelf);
+    }).catch(err => {
+      console.error(`Error procesando mensaje de +${senderPhone}:`, err);
+    });
+    this.phoneQueues.set(senderPhone, currentTask);
+  }
+
+  async processMessageWithHumanizer(senderPhone, text, isSelf) {
     console.log(`\n======================================================`);
     console.log(`[WHATSAPP REAL RECIBIDO]`);
     console.log(`• Remitente: +${senderPhone}`);
     console.log(`• Mensaje: "${text}"`);
     console.log(`======================================================`);
 
-    // Detectar rol
+    // 1. Anti-Ban: Pausa de lectura natural humana (1.2s - 2.2s)
+    const readPauseMs = 1200 + Math.floor(Math.random() * 900);
+    console.log(`⏱️ [Anti-Ban] Pausa de lectura humana: ${readPauseMs}ms...`);
+    await this.sleep(readPauseMs);
+
+    // 2. Anti-Ban: Reportar presencia online y visto en WhatsApp
+    await this.setOnlinePresence(true);
+    await this.sendSeen(senderPhone);
+
+    // 3. Detectar rol y usuario
     const formattedPhone = `+${senderPhone}`;
     const isAdmin = formattedPhone === '+51995992450' || formattedPhone === '+51999888777' || Boolean(db.queryOne(`SELECT * FROM authorized_admins WHERE phone = ? AND active = 1`, [formattedPhone]));
     const role = isAdmin ? 'admin' : 'customer';
@@ -160,10 +241,25 @@ export class WppConnectService {
       conv = { id: convId };
     }
 
-    // Procesar con el Agente de OpenRouter
+    // 4. Procesar con el Agente de OpenRouter
+    console.log(`🤖 [Anti-Ban] Consultando OpenRouter Agent...`);
     const chatResult = await chatService.postMessage(conv.id, actor.id, { text, imageUrls: [] }, role);
     const replyText = chatResult.message.text;
 
+    // 5. Anti-Ban: Simular indicador "Escribiendo..." con tiempo proporcional a la respuesta
+    // Velocidad de tecleo humana realista: ~25ms por carácter (mínimo 2.4s, máximo 6.0s)
+    const typingMs = Math.min(6000, Math.max(2400, Math.floor(replyText.length * 25 + (Math.random() * 800 - 400))));
+    console.log(`✍️ [Anti-Ban] Indicador "Escribiendo..." activo por ${typingMs}ms (${replyText.length} caracteres)...`);
+    
+    await this.setTyping(senderPhone, true);
+    await this.sleep(typingMs);
+    await this.setTyping(senderPhone, false);
+
+    // 6. Anti-Ban: Micropausa de entrega (jitter de 300-600ms)
+    const jitterMs = 300 + Math.floor(Math.random() * 300);
+    await this.sleep(jitterMs);
+
+    // 7. Envío del mensaje
     console.log(`[WHATSAPP REAL ENVIANDO RESPUESTA A +${senderPhone}]:\n"${replyText.slice(0, 100)}..."\n`);
     await this.sendMessage(senderPhone, replyText);
   }
@@ -226,7 +322,7 @@ export class WppConnectService {
   }
 
   startPolling() {
-    // Iniciar el listener de Socket.IO en tiempo real (instantáneo)
+    // Iniciar el listener de Socket.IO en tiempo real
     this.connectSocketListener();
   }
 }
