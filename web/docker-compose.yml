@@ -1,0 +1,258 @@
+name: angibell360
+
+# Página (Next.js) + Almacén (Frappe/ERPNext v16).
+# La página funciona aunque el almacén tarde en levantar: degrada a "stock conocido".
+
+services:
+  # ---------- Página de Angibell 360 ----------
+  web:
+    build: .
+    container_name: angibell-web
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      DATA_DIR: /data
+      PAPERCLIP_API_KEY: ${PAPERCLIP_API_KEY:-cambia-esta-clave}
+      PANEL_PASSWORD: ${PANEL_PASSWORD:-angibell360}
+      ERPNEXT_URL: ${ERPNEXT_URL:-http://frontend:8080}
+      ERPNEXT_API_KEY: ${ERPNEXT_API_KEY:-}
+      ERPNEXT_API_SECRET: ${ERPNEXT_API_SECRET:-}
+    volumes:
+      - ./data:/data
+    networks:
+      - angibell
+
+  # ---------- Almacén: Frappe/ERPNext v16 (base del compose oficial frappe_docker) ----------
+  backend:
+    image: frappe/erpnext:v16.51.1
+    container_name: angibell-erpnext-backend
+    restart: on-failure
+    networks:
+      - angibell
+    volumes:
+      - sites:/home/frappe/frappe-bench/sites
+      - logs:/home/frappe/frappe-bench/logs
+    environment:
+      DB_HOST: db
+      DB_PORT: "3306"
+      MYSQL_ROOT_PASSWORD: admin
+      MARIADB_ROOT_PASSWORD: admin
+    depends_on:
+      configurator:
+        condition: service_completed_successfully
+
+  configurator:
+    image: frappe/erpnext:v16.51.1
+    container_name: angibell-erpnext-configurator
+    restart: "no"
+    networks:
+      - angibell
+    entrypoint:
+      - bash
+      - -c
+    command:
+      - >
+        ls -1 apps > sites/apps.txt;
+        bench set-config -g db_host $$DB_HOST;
+        bench set-config -gp db_port $$DB_PORT;
+        bench set-config -g redis_cache "redis://$$REDIS_CACHE";
+        bench set-config -g redis_queue "redis://$$REDIS_QUEUE";
+        bench set-config -g redis_socketio "redis://$$REDIS_QUEUE";
+        bench set-config -gp socketio_port $$SOCKETIO_PORT;
+    environment:
+      DB_HOST: db
+      DB_PORT: "3306"
+      REDIS_CACHE: redis-cache:6379
+      REDIS_QUEUE: redis-queue:6379
+      SOCKETIO_PORT: "9000"
+    volumes:
+      - sites:/home/frappe/frappe-bench/sites
+      - logs:/home/frappe/frappe-bench/logs
+
+  create-site:
+    image: frappe/erpnext:v16.51.1
+    container_name: angibell-erpnext-create-site
+    restart: "no"
+    networks:
+      - angibell
+    volumes:
+      - sites:/home/frappe/frappe-bench/sites
+      - logs:/home/frappe/frappe-bench/logs
+    entrypoint:
+      - bash
+      - -c
+    command:
+      - >
+        wait-for-it -t 120 db:3306;
+        wait-for-it -t 120 redis-cache:6379;
+        wait-for-it -t 120 redis-queue:6379;
+        export start=`date +%s`;
+        until [[ -n `grep -hs ^ sites/common_site_config.json | jq -r ".db_host // empty"` ]] && \
+          [[ -n `grep -hs ^ sites/common_site_config.json | jq -r ".redis_cache // empty"` ]] && \
+          [[ -n `grep -hs ^ sites/common_site_config.json | jq -r ".redis_queue // empty"` ]];
+        do
+          echo "Esperando sites/common_site_config.json...";
+          sleep 5;
+          if (( `date +%s`-start > 120 )); then
+            echo "No apareció sites/common_site_config.json con las claves requeridas";
+            exit 1
+          fi
+        done;
+        echo "sites/common_site_config.json encontrado";
+        if [ -d "sites/angibell360" ]; then
+          echo "El sitio angibell360 ya existe, se omite su creación";
+        else
+          bench new-site --mariadb-user-host-login-scope='%' --admin-password=admin --db-root-username=root --db-root-password=admin --install-app erpnext --set-default angibell360;
+        fi;
+
+  db:
+    image: mariadb:11.8
+    container_name: angibell-erpnext-db
+    restart: on-failure
+    networks:
+      - angibell
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      start_period: 5s
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+      - --skip-character-set-client-handshake
+    environment:
+      MYSQL_ROOT_PASSWORD: admin
+      MARIADB_ROOT_PASSWORD: admin
+    volumes:
+      - db-data:/var/lib/mysql
+
+  frontend:
+    image: frappe/erpnext:v16.51.1
+    container_name: angibell-erpnext-frontend
+    restart: on-failure
+    networks:
+      - angibell
+    depends_on:
+      - websocket
+      - backend
+    command:
+      - nginx-entrypoint.sh
+    environment:
+      BACKEND: backend:8000
+      FRAPPE_SITE_NAME_HEADER: angibell360
+      SOCKETIO: websocket:9000
+      UPSTREAM_REAL_IP_ADDRESS: 127.0.0.1
+      UPSTREAM_REAL_IP_HEADER: X-Forwarded-For
+      UPSTREAM_REAL_IP_RECURSIVE: "off"
+      PROXY_READ_TIMEOUT: 120
+      CLIENT_MAX_BODY_SIZE: 50m
+    volumes:
+      - sites:/home/frappe/frappe-bench/sites
+      - logs:/home/frappe/frappe-bench/logs
+    ports:
+      - "8080:8080"
+
+  queue-long:
+    image: frappe/erpnext:v16.51.1
+    container_name: angibell-erpnext-queue-long
+    restart: on-failure
+    networks:
+      - angibell
+    command:
+      - bench
+      - worker
+      - --queue
+      - long,default,short
+    volumes:
+      - sites:/home/frappe/frappe-bench/sites
+      - logs:/home/frappe/frappe-bench/logs
+    environment:
+      FRAPPE_REDIS_CACHE: redis://redis-cache:6379
+      FRAPPE_REDIS_QUEUE: redis://redis-queue:6379
+    depends_on:
+      configurator:
+        condition: service_completed_successfully
+
+  queue-short:
+    image: frappe/erpnext:v16.51.1
+    container_name: angibell-erpnext-queue-short
+    restart: on-failure
+    networks:
+      - angibell
+    command:
+      - bench
+      - worker
+      - --queue
+      - short,default
+    volumes:
+      - sites:/home/frappe/frappe-bench/sites
+      - logs:/home/frappe/frappe-bench/logs
+    environment:
+      FRAPPE_REDIS_CACHE: redis://redis-cache:6379
+      FRAPPE_REDIS_QUEUE: redis://redis-queue:6379
+    depends_on:
+      configurator:
+        condition: service_completed_successfully
+
+  redis-queue:
+    image: redis:6.2-alpine
+    container_name: angibell-erpnext-redis-queue
+    restart: on-failure
+    networks:
+      - angibell
+    volumes:
+      - redis-queue-data:/data
+
+  redis-cache:
+    image: redis:6.2-alpine
+    container_name: angibell-erpnext-redis-cache
+    restart: on-failure
+    networks:
+      - angibell
+
+  scheduler:
+    image: frappe/erpnext:v16.51.1
+    container_name: angibell-erpnext-scheduler
+    restart: on-failure
+    networks:
+      - angibell
+    command:
+      - bench
+      - schedule
+    volumes:
+      - sites:/home/frappe/frappe-bench/sites
+      - logs:/home/frappe/frappe-bench/logs
+    depends_on:
+      configurator:
+        condition: service_completed_successfully
+
+  websocket:
+    image: frappe/erpnext:v16.51.1
+    container_name: angibell-erpnext-websocket
+    restart: on-failure
+    networks:
+      - angibell
+    command:
+      - node
+      - /home/frappe/frappe-bench/apps/frappe/socketio.js
+    environment:
+      FRAPPE_REDIS_CACHE: redis://redis-cache:6379
+      FRAPPE_REDIS_QUEUE: redis://redis-queue:6379
+    volumes:
+      - sites:/home/frappe/frappe-bench/sites
+      - logs:/home/frappe/frappe-bench/logs
+    depends_on:
+      configurator:
+        condition: service_completed_successfully
+
+volumes:
+  db-data:
+  redis-queue-data:
+  sites:
+  logs:
+
+networks:
+  angibell:
+    driver: bridge
