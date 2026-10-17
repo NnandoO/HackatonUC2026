@@ -11,6 +11,7 @@ import { orderService } from './services/order.service.js';
 import { paymentService } from './services/payment.service.js';
 import { chatService } from './services/chat.service.js';
 import { socialService } from './services/social.service.js';
+import { wppConnectService } from './services/wppconnect.service.js';
 import { getAuthContext, createCustomerSession } from './middleware/auth.js';
 import { checkIdempotency, saveIdempotency } from './middleware/idempotency.js';
 
@@ -86,6 +87,103 @@ export function createServer() {
                     res.end(html);
                     return;
                 }
+            }
+
+            // 0.05 GET /api/qr-status -> Estado y QR de WppConnect
+            if (method === 'GET' && pathname === '/api/qr-status') {
+                const qrData = await wppConnectService.getQrCode();
+                return sendJson(res, 200, qrData, requestId);
+            }
+
+            // 0.06 GET /qr -> Página interactiva para escanear QR de WhatsApp
+            if (method === 'GET' && pathname === '/qr') {
+                const qrHtml = `<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Vincular WhatsApp Real — ANGIBELL 360</title>
+  <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;600;700&display=swap" rel="stylesheet">
+  <style>
+    body { font-family: 'Plus Jakarta Sans', sans-serif; background: #0c1317; color: #e9edef; display: flex; align-items: center; justify-content: center; min-height: 100vh; margin: 0; padding: 20px; box-sizing: border-box; }
+    .card { background: #111b21; border: 1px solid #2a3942; border-radius: 16px; padding: 36px; max-width: 480px; width: 100%; text-align: center; box-shadow: 0 10px 30px rgba(0,0,0,0.5); }
+    h1 { font-size: 22px; margin-bottom: 8px; color: #25d366; }
+    p { font-size: 13.5px; color: #8696a0; line-height: 1.5; margin-bottom: 24px; }
+    .qr-box { background: white; padding: 16px; border-radius: 12px; display: inline-flex; align-items: center; justify-content: center; width: 280px; height: 280px; margin-bottom: 20px; }
+    .qr-img { width: 100%; height: 100%; display: block; object-fit: contain; }
+    .steps { text-align: left; background: #202c33; padding: 16px 20px; border-radius: 10px; font-size: 13px; line-height: 1.6; color: #cbd5e1; margin-bottom: 20px; }
+    .steps ol { padding-left: 20px; margin: 0; }
+    .status-badge { display: inline-block; padding: 6px 14px; border-radius: 20px; font-size: 13px; font-weight: 600; }
+    .status-badge.waiting { background: rgba(245, 158, 11, 0.15); color: #f59e0b; }
+    .status-badge.connected { background: rgba(34, 197, 94, 0.15); color: #4ade80; }
+    .btn-reload { background: #202c33; border: 1px solid #2a3942; color: #fff; padding: 8px 16px; border-radius: 8px; cursor: pointer; font-size: 12px; }
+    .btn-reload:hover { background: #2a3942; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>📱 Conectar tu WhatsApp Real</h1>
+    <p>Escanea este código QR desde tu WhatsApp para que el agente responda a tus clientes y procese tus órdenes de voz/texto en vivo.</p>
+
+    <div class="steps">
+      <ol>
+        <li>Abre WhatsApp en tu teléfono.</li>
+        <li>Toca <strong>Menú (⋮)</strong> en Android o <strong>Ajustes (⚙️)</strong> en iPhone.</li>
+        <li>Selecciona <strong>Dispositivos vinculados</strong>.</li>
+        <li>Toca <strong>Vincular un dispositivo</strong> y apunta tu cámara hacia esta pantalla.</li>
+      </ol>
+    </div>
+
+    <div class="qr-box" id="qrContainer">
+      <div style="color: #64748b; font-size: 13px;">Generando código QR...</div>
+    </div>
+
+    <div>
+      <span class="status-badge waiting" id="statusBadge">Esperando escaneo...</span>
+    </div>
+
+    <div style="margin-top: 20px;">
+      <button class="btn-reload" onclick="checkStatus()">Actualizar QR ⟳</button>
+      <a href="/simulator" style="color: #25d366; text-decoration: none; font-size: 12px; margin-left: 15px;">Ir al Simulador Web →</a>
+    </div>
+  </div>
+
+  <script>
+    async function checkStatus() {
+      try {
+        const res = await fetch('/api/qr-status');
+        const data = await res.json();
+        const container = document.getElementById('qrContainer');
+        const badge = document.getElementById('statusBadge');
+
+        if (data.connected || data.status === 'CONNECTED') {
+          container.innerHTML = '<div style="font-size: 48px; color: #22c55e;">✅<br><span style="font-size: 15px; font-weight: bold; color: #1e293b;">¡WhatsApp Conectado!</span></div>';
+          badge.className = 'status-badge connected';
+          badge.innerText = '¡Conexión Activa!';
+          return;
+        }
+
+        if (data.qrcode) {
+          const src = data.qrcode.startsWith('data:') ? data.qrcode : ('data:image/png;base64,' + data.qrcode);
+          container.innerHTML = '<img class="qr-img" src="' + src + '" alt="QR Code">';
+          badge.className = 'status-badge waiting';
+          badge.innerText = 'Código QR listo para escanear';
+        } else {
+          container.innerHTML = '<div style="color: #64748b; font-size: 13px;">' + (data.message || 'Cargando QR...') + '</div>';
+        }
+      } catch (err) {
+        console.error('Error cargando QR:', err);
+      }
+    }
+
+    checkStatus();
+    setInterval(checkStatus, 3000);
+  </script>
+</body>
+</html>`;
+                res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+                res.end(qrHtml);
+                return;
             }
 
             // 0.1 GET /checkout/simulated -> Pasarela de pago Culqi Simulada
