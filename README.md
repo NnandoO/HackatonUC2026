@@ -24,3 +24,23 @@ Plataforma de comercio electrónico con automatización comercial para **Angibel
 ## Equipo
 
 SORYNTEL — Conti MIPYME Hackathon 2026.
+
+## Base de contratos v1
+
+Ver [arquitectura](docs/architecture.md), [HTTP](docs/http-api.md),
+[modelo y reglas](docs/data-and-rules.md) y [aceptación](docs/acceptance.md).
+DTO compartidos: `packages/contracts/src/index.ts`.
+
+Requiere Node 22–26 y pnpm 10.30.3:
+
+```sh
+pnpm install --frozen-lockfile
+pnpm check
+pnpm typecheck
+```
+
+`apps/web` y `apps/api` están reservados para los especialistas; esta base no
+arranca tienda, API ni infraestructura. PostgreSQL y Redis se configurarán en
+la entrega backend, sin credenciales en Git. La demo será simulada por defecto.
+La incorporación local del commit inicial está autorizada; integrar ramas de
+implementación, publicar o desplegar requiere revisión humana SORYNTEL.
