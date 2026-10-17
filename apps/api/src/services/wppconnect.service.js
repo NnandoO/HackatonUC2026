@@ -193,8 +193,10 @@ export class WppConnectService {
         body: JSON.stringify({ messageId: msgId })
       });
       const data = await res.json();
-      if (data && data.response) {
-        return data.response;
+      if (data) {
+        if (typeof data === 'string') return data;
+        if (data.base64) return data.base64;
+        if (data.response) return data.response;
       }
     } catch (err) {
       console.error(`Error descargando media para ${msgId}:`, err.message);
