@@ -148,7 +148,7 @@ export class WppConnectService {
     }
   }
 
-  async sendMessage(phone, message) {
+  async sendMessage(phone, message, isLid = false) {
     const token = await this.getToken();
     const cleanPhone = phone.replace(/[^0-9]/g, '');
     try {
@@ -160,6 +160,7 @@ export class WppConnectService {
         },
         body: JSON.stringify({
           phone: cleanPhone,
+          isLid: Boolean(isLid),
           message
         })
       });
@@ -242,7 +243,7 @@ export class WppConnectService {
     }
   }
 
-  pushToBuffer(senderPhone, text, isSelf) {
+  pushToBuffer(senderPhone, text, isSelf, isLid = false) {
     // 1. Enviar 'visto' de inmediato para acuse de recibo natural
     this.sendSeen(senderPhone);
 
@@ -250,10 +251,11 @@ export class WppConnectService {
     let entry = this.userBuffers.get(senderPhone);
 
     if (!entry) {
-      console.log(`📥 [Buffer] Nuevo hilo de mensajes para +${senderPhone}. Ventana de silencio iniciada (${DEBOUNCE_WAIT_MS / 1000}s)...`);
+      console.log(`📥 [Buffer] Nuevo hilo de mensajes para +${senderPhone} (isLid: ${isLid}). Ventana de silencio iniciada (${DEBOUNCE_WAIT_MS / 1000}s)...`);
       entry = {
         senderPhone,
         isSelf,
+        isLid: Boolean(isLid),
         messages: [text],
         firstReceivedAt: now,
         timer: null
@@ -262,6 +264,7 @@ export class WppConnectService {
       this.userBuffers.set(senderPhone, entry);
     } else {
       entry.messages.push(text);
+      if (isLid) entry.isLid = true;
       const elapsed = now - entry.firstReceivedAt;
       console.log(`📥 [Buffer] Mensaje acumulado de +${senderPhone} (${entry.messages.length} mensajes). Tiempo en ráfaga: ${elapsed}ms`);
 
@@ -281,7 +284,7 @@ export class WppConnectService {
 
     const combinedText = entry.messages.join('\n');
     console.log(`\n======================================================`);
-    console.log(`🚀 [Buffer Flush] Ráfaga completa lista para responder a +${senderPhone}:`);
+    console.log(`🚀 [Buffer Flush] Ráfaga completa lista para responder a +${senderPhone} (isLid: ${entry.isLid}):`);
     console.log(`• Total mensajes unificados: ${entry.messages.length}`);
     console.log(`• Contenido consolidado:\n${combinedText}`);
     console.log(`======================================================`);
@@ -289,7 +292,7 @@ export class WppConnectService {
     // Procesar en la cola secuencial por número con Anti-Ban
     const prevQueue = this.phoneQueues.get(senderPhone) || Promise.resolve();
     const currentTask = prevQueue.then(async () => {
-      await this.processMessageWithHumanizer(senderPhone, combinedText, entry.isSelf);
+      await this.processMessageWithHumanizer(senderPhone, combinedText, entry.isSelf, entry.isLid);
     }).catch(err => {
       console.error(`Error procesando ráfaga unificada de +${senderPhone}:`, err);
     });
@@ -306,7 +309,13 @@ export class WppConnectService {
     this.processedMsgIds.add(msgId);
     if (this.processedMsgIds.size > 2000) this.processedMsgIds.clear();
 
+    // Ignorar mensajes de grupos (@g.us)
+    if (msg.isGroupMsg || (msg.from && msg.from.includes('@g.us')) || (msg.chatId && msg.chatId.includes('@g.us'))) {
+      return;
+    }
+
     const senderPhone = (msg.from || '').replace('@c.us', '').replace('@lid', '');
+    const isLid = Boolean((msg.from && msg.from.includes('@lid')) || (msg.chatId && msg.chatId.includes('@lid')));
 
     // Si el mensaje es saliente hacia otra persona (no auto-chat), ignorar
     const isSelf = msg.to === msg.from || (msg.chatId && (msg.chatId.includes('51995992450') || msg.chatId.includes('152875737075771')));
@@ -327,7 +336,7 @@ export class WppConnectService {
 
     let text = '';
     if (isAudio) {
-      console.log(`🎙️ [Audio WhatsApp] Nota de voz detectada de +${senderPhone} (msgId: ${msgId}). Transcribiendo...`);
+      console.log(`🎙️ [Audio WhatsApp] Nota de voz detectada de +${senderPhone} (msgId: ${msgId}, isLid: ${isLid}). Transcribiendo...`);
       let mediaData = (msg.body && typeof msg.body === 'string' && msg.body.startsWith('data:audio')) ? msg.body : await this.downloadMedia(msgId);
       const transcription = await this.transcribeAudio(mediaData);
 
@@ -345,10 +354,10 @@ export class WppConnectService {
     if (!text) return;
 
     // Agregar a la cola de buffer / debouncer (evita responder mensaje por mensaje)
-    this.pushToBuffer(senderPhone, text, isSelf);
+    this.pushToBuffer(senderPhone, text, isSelf, isLid);
   }
 
-  async processMessageWithHumanizer(senderPhone, text, isSelf) {
+  async processMessageWithHumanizer(senderPhone, text, isSelf, isLid = false) {
     // 1. Anti-Ban: Pausa de lectura natural humana (1.2s - 2.1s)
     const readPauseMs = 1200 + Math.floor(Math.random() * 900);
     console.log(`⏱️ [Anti-Ban] Pausa de lectura humana: ${readPauseMs}ms...`);
@@ -397,8 +406,8 @@ export class WppConnectService {
     await this.sleep(jitterMs);
 
     // 7. Envío del mensaje consolidado
-    console.log(`[WHATSAPP REAL ENVIANDO RESPUESTA UNIFICADA A +${senderPhone}]:\n"${replyText.slice(0, 120)}..."\n`);
-    await this.sendMessage(senderPhone, replyText);
+    console.log(`[WHATSAPP REAL ENVIANDO RESPUESTA UNIFICADA A +${senderPhone} (isLid=${isLid})]:\n"${replyText.slice(0, 120)}..."\n`);
+    await this.sendMessage(senderPhone, replyText, isLid);
   }
 
   connectSocketListener() {
