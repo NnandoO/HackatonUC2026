@@ -8,13 +8,13 @@ web
 
 ## Stack
 
-Demo que existe hoy: Next.js + TypeScript para tienda/panel, SQLite local para catálogo y una API Node.js HTTP con `node:sqlite` para reservas, pedidos, agente y publicaciones. ERPNext v16 puede levantarse como almacén opcional, pero no comparte transacciones de stock con la API comercial. El plan maestro mantiene Next.js + NestJS + PostgreSQL + BullMQ como destino de producción; esa migración está pendiente.
+Implementación actual: Next.js + TypeScript para tienda/panel, PostgreSQL 17 como fuente única de datos y API comercial Node.js HTTP. La tienda consulta y actualiza el catálogo mediante la API; reservas, pedidos, publicaciones y aprobaciones usan la misma base transaccional. La API todavía no está implementada con NestJS y BullMQ no está integrado.
 
 ## Users
 
 - **Propietaria de Angibell Creaciones** (Huancayo, Perú): registra y publica prendas, aprueba publicaciones y controla el stock. Su centro de operación es WhatsApp; este panel es su respaldo web.
 - **Clientas**: madres, padres y familiares que compran ropa de niñas 0–14; navegan desde el celular.
-- **Jurado del hackathon** (demo del domingo) y equipo SORYNTEL: recorren catálogo → publicación entrante de Paperclip → aprobación → almacén.
+- **Jurado del hackathon** y equipo SORYNTEL: recorren catálogo → publicación entrante de Paperclip → aprobación → tienda y bot comercial.
 
 ## Product Purpose
 
@@ -27,7 +27,7 @@ Un catálogo vivo conectado a un motor comercial de demostración: la propietari
 ## Operating Context
 
 - Hackathon Conti MIPYME 2026 (SORYNTEL); la demo cierra el domingo.
-- Todo corre local en Docker (página + API); ERPNext se inicia aparte y no es requisito del recorrido de ventas.
+- Todo corre local en Docker (página + API + PostgreSQL); no requiere ERPNext.
 - Paperclip (equipo de agentes Codex de la PC del equipo) se conecta por HTTP con `X-API-Key` para subir publicaciones.
 - Las fotos reales de productos llegarán por lotes de 4 durante el desarrollo; hasta entonces hay material sintético etiquetado.
 - Precios en soles (PEN), guardados en céntimos. Pagos reales fuera del alcance de la demo.
@@ -36,7 +36,7 @@ Un catálogo vivo conectado a un motor comercial de demostración: la propietari
 
 - Catálogo con variantes por talla, stock por variante, fotos, descripción y precio.
 - Publicaciones entrantes con estado pendiente → aprobar/rechazar en el panel; log de auditoría de cada entrada.
-- Stock por variantes, reservas de venta y pagos simulados en SQLite de la API. ERPNext es auxiliar de almacén y puede mostrar un valor distinto hasta completar la unificación de inventario.
+- Stock por variantes, reservas de venta y pagos simulados en PostgreSQL compartido por API y tienda.
 - La IA interpreta; el sistema valida. Sin pagos reales; la publicación externa en Meta queda desactivada por defecto.
 - Sin push, merge ni despliegue sin revisión humana (regla del plan v2).
 
@@ -57,7 +57,7 @@ Un catálogo vivo conectado a un motor comercial de demostración: la propietari
 1. Aprobar antes de publicar: la revisión de la propietaria es una función, no un obstáculo.
 2. Ningún dato inventado: sin stock o foto real, se declara la ausencia o el material sintético.
 3. La IA propone; el sistema valida (precios, stock, permisos) y todo queda auditado.
-4. Un solo comando levanta la tienda y API del demo; servicios externos y ERPNext siguen siendo opcionales.
+4. Un solo comando levanta PostgreSQL, la tienda y API del demo; servicios externos siguen siendo opcionales.
 5. El backend comercial valida reservas y pedidos; la página presenta el catálogo y el panel.
 
 ## Accessibility & Inclusion

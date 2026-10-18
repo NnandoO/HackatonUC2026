@@ -1,6 +1,6 @@
 # Criterios de aceptación y revisión
 
-Alcance: estos son criterios de aceptación de producción; no describen el estado ya alcanzado por el demo. El demo actual sí tiene tienda Next.js, API Node.js/SQLite, panel de ventas y borradores Meta. `apps/api` no es NestJS y no usa PostgreSQL; `web/` mantiene su catálogo SQLite separado. La integración de las dos bases es parcial.
+Alcance: criterios de aceptación del producto y su estado. La tienda Next.js y la API Node.js comparten PostgreSQL 17; la suite `apps/api/src/qa-integration.test.js` verifica el esquema, la sincronización tienda/API, concurrencia de stock, ventas, pagos simulados y estado OAuth de Meta. NestJS, BullMQ, Culqi real y publicación Meta autorizada siguen pendientes.
 
 Backend: migraciones reproducibles PostgreSQL con constraints; validar entrada y propiedad de recursos; dos pedidos concurrentes por una unidad producen un solo ganador; fallo de una línea revierte toda reserva. Duplicar petición devuelve mismo pedido; distinta carga con misma key da 409. Expiración repetida libera una vez; set_stock debajo de reservado se rechaza. Pago duplicado se aplica una vez; firma falsa/importe/moneda/cuenta incorrecta no confirma pedido. Carrera webhook-expirador no causa stock negativo; pago tardío se deriva a conciliación. Cliente ajeno y rol admin falsificado no acceden. Propuesta expirada, actor distinto y versión obsoleta no mutan datos; confirmación válida produce una auditoría y un outbox.
 

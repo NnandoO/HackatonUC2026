@@ -9,14 +9,13 @@ Plataforma de comercio electrónico con automatización comercial para **Angibel
 ## Stack del demo actual
 
 - **Next.js + TypeScript** — tienda virtual y panel administrable
-- **API Node.js HTTP + `node:sqlite`** — catálogo comercial, reservas, pedidos, propuestas y pagos simulados; no es NestJS ni PostgreSQL.
-- **SQLite** — datos persistentes del demo. La tienda conserva su propio catálogo local y sincroniza productos/stock aprobados con la API comercial.
-- **ERPNext v16 opcional** — almacén de respaldo levantado por separado; no comparte transacciones de reservas con la API comercial.
+- **API comercial Node.js HTTP** — catálogo, reservas, pedidos, propuestas y pagos simulados. PostgreSQL es la fuente única de datos para la API y la tienda; el servicio actual todavía no está implementado con NestJS.
+- **PostgreSQL 17** — catálogo y operaciones comerciales en una sola base, con migraciones de esquema y transacciones de stock.
 - **WPPConnect opcional** — puente de demostración; la WhatsApp Cloud API oficial tiene webhook con firma, pero requiere credenciales externas.
 - **Facebook/Instagram** — borradores y flujo de aprobación preparados; publicar fuera del demo está desactivado por defecto.
 - **Culqi** — aún no conectado; el demo genera pagos simulados.
 
-El destino de producción definido por el plan sigue siendo Next.js + NestJS + PostgreSQL + BullMQ. No se debe describir como implementado hasta migrar y verificar esos componentes.
+PostgreSQL y el acceso unificado de la tienda/API ya están implementados y cuentan con pruebas de integración. NestJS y BullMQ siguen en el plan como trabajo pendiente; no se describen como implementados.
 
 ## Documentos
 
@@ -40,7 +39,7 @@ La web queda en `http://localhost:3000`; el chat de demostración está en
 queda accesible desde el propio equipo en `localhost:4000`. El puente de
 WhatsApp inicia desactivado. Para respuestas generadas por IA se debe agregar
 `OPENROUTER_API_KEY` a `web/.env`; sin esa clave, el proveedor no podrá responder.
-El script crea claves locales aleatorias para el panel, Paperclip y el ERP. Las credenciales se guardan en `web/.env`; no compartir ese archivo.
+El script crea claves locales aleatorias para el panel, Paperclip, PostgreSQL y el cifrado de tokens Meta. Las credenciales se guardan en `web/.env`; no compartir ese archivo.
 
 Al aprobar una publicación en el panel, el producto pasa también al catálogo
 del motor comercial, queda preparado un texto para Meta y aparece en el chat de
@@ -64,8 +63,8 @@ pnpm check
 pnpm typecheck
 ```
 
-La tienda y API de demostración descritas arriba ya pueden ejecutarse juntas.
-`apps/api` es un prototipo Node.js con SQLite; `web/` usa SQLite para su propio
-catálogo. El plan de producción mantiene NestJS, PostgreSQL y Redis como destino.
-No guardar credenciales en Git. La integración local se hace en una rama
-revisable; no implica push ni despliegue.
+La tienda y API descritas arriba comparten PostgreSQL. `apps/api` es una API
+Node.js HTTP (aún no NestJS); `web/` consume el catálogo y las operaciones por
+esa API. Culqi sigue simulado y la publicación externa de Meta permanece
+desactivada hasta configurar credenciales y autorización. No guardar
+credenciales en Git.
