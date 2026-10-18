@@ -21,7 +21,12 @@ function fechaCorta(iso: string): string {
 
 export default async function Home() {
   const productos = listProducts({ status: "publicado", limit: 200 }).map(toPublicProduct);
-  const hero = productos.find((p) => p.slug === "vestido-rosas") ?? productos[0];
+  const conFoto = productos.filter((p) => p.images.length > 0);
+  const hero =
+    conFoto.find((p) => p.slug === "vestido-rosas") ??
+    conFoto[0] ??
+    productos.find((p) => p.slug === "vestido-rosas") ??
+    productos[0];
   const piezas = productos.filter((p) => p.slug !== hero?.slug).slice(0, 4);
   const [erpCfg, erpEstado] = await Promise.all([getErpnextConfig(), getErpnextState()]);
 
@@ -99,7 +104,7 @@ export default async function Home() {
               <Alfiler className="-right-2 -top-2" />
               <Alfiler className="-left-2 -bottom-2" />
               <div className="num absolute -left-3 bottom-8 rotate-[-4deg] border-[1.5px] border-tinta bg-papel px-3 py-2 text-[12px]">
-                Talla 4 · {precioHero}
+                Talla {hero.variants.find((v) => v.stock > 0)?.size ?? hero.variants[0]?.size ?? "Única"} · {precioHero}
               </div>
             </div>
           </div>
