@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "start": "node src/main.js",
-    "test": "node --test src/api.test.js"
+    "test": "node --test --test-concurrency=1 src/api.test.js src/qa-integration.test.js"
   },
   "dependencies": {
     "pg": "8.23.0"
