@@ -1,0 +1,56 @@
+[
+  {
+    "key": "contratos",
+    "owner": "coordinador",
+    "title": "Cerrar contratos y preparar monorepo",
+    "description": "Crear docs de API/modelos, paquetes compartidos, reglas de inventario y pagos, estructura pnpm y criterios de aceptación. Leer el plan v2. Entregar commit base antes de asignar implementación.",
+    "dependsOn": []
+  },
+  {
+    "key": "comercio",
+    "owner": "backend",
+    "title": "Construir núcleo comercial e inventario",
+    "description": "Catálogo administrable, variantes, stock transaccional, pedidos, autenticación administrativa y auditoría. Migraciones y seed demo. Pruebas de autorización y concurrencia.",
+    "dependsOn": [
+      "contratos"
+    ]
+  },
+  {
+    "key": "tienda",
+    "owner": "frontend",
+    "title": "Construir tienda y panel de respaldo",
+    "description": "Catálogo, filtros, detalle, carrito, checkout de prueba y panel productos/stock/pedidos. Consumir contrato real. Usar impeccable y verificar móvil/escritorio.",
+    "dependsOn": [
+      "contratos"
+    ]
+  },
+  {
+    "key": "canales",
+    "owner": "integraciones",
+    "title": "Implementar asistentes y adaptadores de canales",
+    "description": "Foto y borrador administrativo con confirmación, bot comercial con herramientas, publicaciones aprobables, Cola BullMQ y Culqi de prueba. Guía de credenciales y estados de desconexión.",
+    "dependsOn": [
+      "comercio"
+    ]
+  },
+  {
+    "key": "verificacion",
+    "owner": "qa",
+    "title": "Verificar seguridad y recorrido de demo",
+    "description": "Tipos, tests, build, seguridad de autorización, pagos idempotentes y stock. Recorrido foto → confirmación → tienda → borrador Meta → bot → pedido/pago de prueba. Integración solo tras aprobación humana.",
+    "dependsOn": [
+      "comercio",
+      "tienda",
+      "canales"
+    ]
+  },
+  {
+    "key": "entrega",
+    "owner": "coordinador",
+    "title": "Preparar entrega y revisión SORYNTEL",
+    "description": "Documentar ramas y commits, resultados, limitaciones, comandos de ejecución y solicitud de revisión humana para integrar. No merge, push ni despliegue.",
+    "dependsOn": [
+      "verificacion"
+    ]
+  }
+]
