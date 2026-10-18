@@ -7,6 +7,23 @@ import { paymentService } from './services/payment.service.js';
 import { proposalService } from './services/proposal.service.js';
 import { checkIdempotency, saveIdempotency } from './middleware/idempotency.js';
 import { db } from './database/db.js';
+import { agentService, isWithinAngibellScope } from './services/agent.service.js';
+import { salesService } from './services/sales.service.js';
+
+test('Chat scope guard rejects unrelated questions and preserves commerce follow-ups', () => {
+    assert.equal(isWithinAngibellScope('¿Cómo programo una API en Python?'), false);
+    assert.equal(isWithinAngibellScope('[Nota de voz]: "¿Quién es el presidente del Perú?"'), false);
+    assert.equal(isWithinAngibellScope('¿Tienen vestidos en talla 8?'), true);
+    assert.equal(isWithinAngibellScope('Quiero uno rojo', [
+        { role: 'assistant', text: 'Tenemos vestidos de fiesta en talla 8.' }
+    ]), true);
+    assert.equal(isWithinAngibellScope('8', [
+        { role: 'assistant', text: '¿Qué talla buscas para el vestido?' }
+    ]), true);
+    assert.equal(isWithinAngibellScope('¿Cómo programo una API en Python?', [
+        { role: 'assistant', text: 'Tenemos vestidos de fiesta en talla 8.' }
+    ]), false);
+});
 test('Catalog: creates draft and requires proposal to publish', () => {
     const actorId = crypto.randomUUID();
     const prod = catalogService.createProduct({
@@ -127,4 +144,42 @@ test('Payment & Webhook: stock settlement upon valid payment', () => {
     const updatedVariant = db.queryOne(`SELECT * FROM variants WHERE id = ?`, [variantId]);
     assert.equal(updatedVariant.stock_on_hand, 1);
     assert.equal(updatedVariant.stock_reserved, 0);
+});
+
+test('Sales advisor: validation is required before reserving stock or creating a payment', async () => {
+    const customerId = crypto.randomUUID();
+    const adminId = crypto.randomUUID();
+    db.execute(`INSERT INTO actors (id, role, created_at) VALUES (?, 'customer', ?)`, [customerId, new Date().toISOString()]);
+    db.execute(`INSERT INTO actors (id, role, created_at) VALUES (?, 'admin', ?)`, [adminId, new Date().toISOString()]);
+    const product = catalogService.createProduct({
+        name: 'Vestido Venta Validada', description: 'Prueba de validación comercial', imageUrls: [],
+        variants: [{ sku: `SALE-${crypto.randomUUID()}`, size: '8', color: 'Rosa',
+            price: { amountCents: 12000, currency: 'PEN' }, stock: 3 }]
+    }, adminId);
+    const publish = proposalService.createProposal({ kind: 'publish_product', productId: product.id,
+        expectedVersion: product.version }, adminId);
+    proposalService.confirmProposal(publish.id, adminId, 'CONFIRM');
+    const variantId = product.variants[0].id;
+    const request = salesService.createRequest({ items: [{ variantId, quantity: 1 }],
+        deliveryMethod: 'delivery', deliveryZone: 'El Tambo', deliveryAddress: 'Jr. Prueba 123',
+        requestedDate: 'domingo' }, customerId);
+    assert.equal(request.status, 'pending');
+    assert.equal(db.queryOne(`SELECT stock_reserved FROM variants WHERE id = ?`, [variantId]).stock_reserved, 0);
+    assert.equal(db.queryOne(`SELECT COUNT(*) AS count FROM orders WHERE actor_id = ?`, [customerId]).count, 0);
+    assert.throws(() => salesService.approveRequest(request.id, customerId,
+        { deliveryDate: '2099-01-01', shippingCents: 1000 }), /FORBIDDEN/);
+    assert.throws(() => salesService.approveRequest(request.id, adminId,
+        { deliveryDate: '2099-01-01' }), /INVALID_INPUT/);
+    const inventedApproval = await agentService.executeTool('approve_sale',
+        { requestId: request.id, deliveryDate: '2099-01-01', shippingCents: 1000 },
+        { actorId: adminId, conversationId: null, userRole: 'admin', text: 'Aprueba esa venta' });
+    assert.match(inventedApproval.error, /escribe/);
+    assert.equal(db.queryOne(`SELECT status FROM sales_requests WHERE id = ?`, [request.id]).status, 'pending');
+    const approved = salesService.approveRequest(request.id, adminId,
+        { deliveryDate: '2099-01-01', shippingCents: 1000 });
+    assert.equal(approved.status, 'approved');
+    assert.equal(approved.totalCents, 13000);
+    assert.equal(db.queryOne(`SELECT stock_reserved FROM variants WHERE id = ?`, [variantId]).stock_reserved, 1);
+    assert.throws(() => salesService.approveRequest(request.id, adminId,
+        { deliveryDate: '2099-01-01', shippingCents: 1000 }), /CONFLICT/);
 });

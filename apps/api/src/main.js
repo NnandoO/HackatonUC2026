@@ -2,6 +2,9 @@ import fs from 'node:fs';
 if (fs.existsSync('.env')) {
   try { process.loadEnvFile('.env'); } catch (e) {}
 }
+if (fs.existsSync('.env.meta')) {
+  try { process.loadEnvFile('.env.meta'); } catch (e) {}
+}
 
 import { createServer } from './server.js';
 import { runSeed } from './seed.js';

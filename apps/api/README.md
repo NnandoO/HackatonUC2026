@@ -1,3 +1,15 @@
-# @angibell/api (reservado)
+# ANGIBELL 360 API (prototipo)
 
-Worker backend: implementar NestJS + TypeScript, PostgreSQL, migraciones y validadores de ejecución tras habilitación del operador. Consumir @angibell/contracts con workspace:*. No hay servidor todavía. BullMQ + Redis para outbox, expiraciones y entregas; la base de datos es la autoridad.
+El asesor comercial consulta el catálogo real y prepara solicitudes de venta. Para delivery pide distrito, dirección y fecha deseada; la fecha y el costo no se prometen hasta que la administradora los valide.
+
+Flujo de venta por WhatsApp:
+
+1. El cliente elige variante, cantidad y recojo o delivery. `create_order` crea una solicitud `pending` sin reservar stock ni generar pago.
+2. La administradora recibe el identificador de la solicitud y puede consultar pendientes con `list_pending_sales` o `GET /v1/admin/sales-requests`.
+3. Para aprobar por WhatsApp debe escribir: `APROBAR <ID> fecha YYYY-MM-DD envío S/ 10.00`. En recojo, usar `envío S/ 0.00`. También puede usar `POST /v1/admin/sales-requests/:id/approve` con `{ "deliveryDate": "YYYY-MM-DD", "shippingCents": 1000 }`.
+4. La aprobación vuelve a comprobar precio y stock, crea el pedido y la reserva por 15 minutos, registra auditoría y prepara un enlace de **pago de prueba**. Se avisa al cliente por WhatsApp si el envío del mensaje funciona.
+5. Si no procede, la administradora usa `reject_sale` o `POST /v1/admin/sales-requests/:id/reject` con `{ "reason": "..." }`.
+
+La API exige sesión de administradora para revisar o decidir solicitudes. `SALES_ADMIN_PHONE` define el número al que llegan avisos. `PUBLIC_BASE_URL` debe apuntar a un backend HTTPS vigente para que el enlace de pago de prueba sea accesible. La integración real de Culqi y las reglas definitivas de fechas y tarifas de reparto siguen pendientes.
+
+El bot permanece apagado hasta que se inicie explícitamente el proceso `apps/api/src/main.js`.

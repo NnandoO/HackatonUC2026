@@ -54,7 +54,10 @@ export class OrderService {
                     unitPriceCents: v.price_cents,
                 });
             }
-            const shippingCents = 0; // 'pickup' zone = 0 S/
+            const shippingCents = Number(input.shippingCents ?? 0);
+            if (!Number.isSafeInteger(shippingCents) || shippingCents < 0) {
+                throw new Error('INVALID_INPUT: Costo de envío inválido.');
+            }
             const totalCents = subtotalCents + shippingCents;
             const actor = db.queryOne(`SELECT id FROM actors WHERE id = ?`, [actorId]);
             if (!actor) {

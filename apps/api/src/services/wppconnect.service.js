@@ -1,11 +1,23 @@
 import { chatService } from './chat.service.js';
 import { db } from '../database/db.js';
 import crypto from 'node:crypto';
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+export const MEDIA_DIR = path.resolve(__dirname, '../../../../.state/media');
+const MAX_IMAGE_BYTES = 8 * 1024 * 1024;
+const IMAGE_EXTENSIONS = new Map([
+  ['image/jpeg', 'jpg'],
+  ['image/png', 'png'],
+  ['image/webp', 'webp']
+]);
 
 const WPP_BASE_URL = process.env.WPPCONNECT_BASE_URL || 'http://127.0.0.1:21465';
 const SECRET_KEY = process.env.WPPCONNECT_SECRET_KEY || 'f3d03d5856e6ab6b5a200ec5448bf7ba9a354870fafc74fc';
 const SESSION_NAME = 'angibell';
-const GROQ_API_KEY = process.env.GROQ_API_KEY || '';
+const getGroqApiKey = () => process.env.GROQ_API_KEY || '';
 
 const DEBOUNCE_WAIT_MS = 3500;    // Ventana de silencio: espera 3.5s tras el último mensaje
 const MAX_BUFFER_WAIT_MS = 10000; // Límite máximo de espera en ráfaga: 10 segundos
@@ -20,6 +32,36 @@ export class WppConnectService {
 
   sleep(ms) {
     return new Promise(resolve => setTimeout(resolve, ms));
+  }
+
+  isAuthorizedAdmin(senderPhone) {
+    const formattedPhone = `+${String(senderPhone || '').replace(/[^0-9]/g, '')}`;
+    return Boolean(db.queryOne(`SELECT phone FROM authorized_admins WHERE phone = ? AND active = 1`, [formattedPhone]));
+  }
+
+  storeAdminImage(mediaData, declaredMimeType = '') {
+    if (typeof mediaData !== 'string' || !mediaData.trim()) {
+      throw new Error('No se pudo descargar la imagen.');
+    }
+
+    const dataUriMatch = mediaData.match(/^data:(image\/[a-z0-9.+-]+);base64,(.+)$/is);
+    const mimeType = (dataUriMatch?.[1] || declaredMimeType || '').toLowerCase().split(';')[0];
+    const extension = IMAGE_EXTENSIONS.get(mimeType);
+    if (!extension) throw new Error('Formato no permitido. Usa JPG, PNG o WebP.');
+
+    const base64 = (dataUriMatch?.[2] || mediaData).replace(/\s/g, '');
+    const imageBuffer = Buffer.from(base64, 'base64');
+    if (imageBuffer.length < 64) throw new Error('La imagen está vacía o dañada.');
+    if (imageBuffer.length > MAX_IMAGE_BYTES) throw new Error('La imagen supera el máximo de 8 MB.');
+
+    fs.mkdirSync(MEDIA_DIR, { recursive: true, mode: 0o750 });
+    const filename = `${crypto.randomUUID()}.${extension}`;
+    fs.writeFileSync(path.join(MEDIA_DIR, filename), imageBuffer, { mode: 0o640 });
+
+    return {
+      analysisUrl: `data:${mimeType};base64,${imageBuffer.toString('base64')}`,
+      storedUrl: `/media/${filename}`
+    };
   }
 
   async getToken() {
@@ -224,7 +266,7 @@ export class WppConnectService {
       const res = await fetch('https://api.groq.com/openai/v1/audio/transcriptions', {
         method: 'POST',
         headers: {
-          'Authorization': `Bearer ${GROQ_API_KEY}`
+          'Authorization': `Bearer ${getGroqApiKey()}`
         },
         body: formData
       });
@@ -243,7 +285,7 @@ export class WppConnectService {
     }
   }
 
-  pushToBuffer(senderPhone, text, isSelf, isLid = false) {
+  pushToBuffer(senderPhone, text, isSelf, isLid = false, imageUrls = [], storedImageUrls = []) {
     // 1. Enviar 'visto' de inmediato para acuse de recibo natural
     this.sendSeen(senderPhone);
 
@@ -257,6 +299,8 @@ export class WppConnectService {
         isSelf,
         isLid: Boolean(isLid),
         messages: [text],
+        imageUrls: [...imageUrls],
+        storedImageUrls: [...storedImageUrls],
         firstReceivedAt: now,
         timer: null
       };
@@ -264,6 +308,8 @@ export class WppConnectService {
       this.userBuffers.set(senderPhone, entry);
     } else {
       entry.messages.push(text);
+      entry.imageUrls.push(...imageUrls);
+      entry.storedImageUrls.push(...storedImageUrls);
       if (isLid) entry.isLid = true;
       const elapsed = now - entry.firstReceivedAt;
       console.log(`📥 [Buffer] Mensaje acumulado de +${senderPhone} (${entry.messages.length} mensajes). Tiempo en ráfaga: ${elapsed}ms`);
@@ -292,7 +338,14 @@ export class WppConnectService {
     // Procesar en la cola secuencial por número con Anti-Ban
     const prevQueue = this.phoneQueues.get(senderPhone) || Promise.resolve();
     const currentTask = prevQueue.then(async () => {
-      await this.processMessageWithHumanizer(senderPhone, combinedText, entry.isSelf, entry.isLid);
+      await this.processMessageWithHumanizer(
+        senderPhone,
+        combinedText,
+        entry.isSelf,
+        entry.isLid,
+        entry.imageUrls,
+        entry.storedImageUrls
+      );
     }).catch(err => {
       console.error(`Error procesando ráfaga unificada de +${senderPhone}:`, err);
     });
@@ -323,11 +376,33 @@ export class WppConnectService {
       return;
     }
 
-    // Omitir imágenes y videos según requerimiento expreso ("imágenes no")
-    const isImageOrVideo = msg.type === 'image' || msg.type === 'video' || msg.type === 'sticker' ||
-      (msg.mimetype && (msg.mimetype.startsWith('image') || msg.mimetype.startsWith('video')));
-    if (isImageOrVideo) {
-      console.log(`🖼️ [WppConnect] Imagen/video recibido de +${senderPhone} omitido (soporte visual no activo).`);
+    const isImage = msg.type === 'image' || (msg.mimetype && msg.mimetype.startsWith('image/'));
+    const isUnsupportedVisual = msg.type === 'video' || msg.type === 'sticker' ||
+      (msg.mimetype && msg.mimetype.startsWith('video/'));
+    if (isUnsupportedVisual) {
+      console.log(`🖼️ [WppConnect] Video/sticker de +${senderPhone} omitido.`);
+      return;
+    }
+
+    if (isImage) {
+      if (!this.isAuthorizedAdmin(senderPhone, isSelf)) {
+        console.log(`🔒 [WppConnect] Imagen de +${senderPhone} ignorada: no es administrador.`);
+        return;
+      }
+
+      try {
+        const mediaData = (typeof msg.body === 'string' && msg.body.startsWith('data:image/'))
+          ? msg.body
+          : await this.downloadMedia(msgId);
+        const stored = this.storeAdminImage(mediaData, msg.mimetype);
+        const caption = String(msg.caption || (msg.body?.startsWith?.('data:image/') ? '' : msg.body) || '').trim();
+        const text = caption || '[Imagen de producto recibida: analiza la prenda y prepara su registro.]';
+        console.log(`🖼️ [WppConnect] Imagen administrativa validada y almacenada como ${path.basename(stored.storedUrl)}.`);
+        this.pushToBuffer(senderPhone, text, isSelf, isLid, [stored.analysisUrl], [stored.storedUrl]);
+      } catch (err) {
+        console.error(`Error procesando imagen administrativa de +${senderPhone}:`, err.message);
+        await this.sendMessage(senderPhone, `No pude procesar la foto: ${err.message}`, isLid);
+      }
       return;
     }
 
@@ -357,7 +432,7 @@ export class WppConnectService {
     this.pushToBuffer(senderPhone, text, isSelf, isLid);
   }
 
-  async processMessageWithHumanizer(senderPhone, text, isSelf, isLid = false) {
+  async processMessageWithHumanizer(senderPhone, text, isSelf, isLid = false, imageUrls = [], storedImageUrls = []) {
     // 1. Anti-Ban: Pausa de lectura natural humana (1.2s - 2.1s)
     const readPauseMs = 1200 + Math.floor(Math.random() * 900);
     console.log(`⏱️ [Anti-Ban] Pausa de lectura humana: ${readPauseMs}ms...`);
@@ -369,7 +444,7 @@ export class WppConnectService {
 
     // 3. Detectar rol y usuario
     const formattedPhone = `+${senderPhone}`;
-    const isAdmin = formattedPhone === '+51995992450' || formattedPhone === '+51999888777' || Boolean(db.queryOne(`SELECT * FROM authorized_admins WHERE phone = ? AND active = 1`, [formattedPhone]));
+    const isAdmin = this.isAuthorizedAdmin(senderPhone, isSelf);
     const role = isAdmin ? 'admin' : 'customer';
 
     // Buscar o crear actor y conversación
@@ -390,7 +465,7 @@ export class WppConnectService {
 
     // 4. Procesar con el Agente de OpenRouter (análisis unificado de la ráfaga)
     console.log(`🤖 [Anti-Ban] Consultando OpenRouter Agent para ráfaga unificada...`);
-    const chatResult = await chatService.postMessage(conv.id, actor.id, { text, imageUrls: [] }, role);
+    const chatResult = await chatService.postMessage(conv.id, actor.id, { text, imageUrls, storedImageUrls }, role);
     const replyText = chatResult.message.text;
 
     // 5. Anti-Ban: Simular indicador "Escribiendo..." proporcional a la respuesta
