@@ -246,6 +246,17 @@ export async function listProducts(
 export async function getProductById(id: string): Promise<Product | null> {
   if (!id) return null;
   try {
+    const adminRes = await coreApiFetch(`/v1/admin/products/${encodeURIComponent(id)}`, {
+      admin: true,
+    });
+    if (adminRes.ok) {
+      const raw = unwrapProduct(await adminRes.json().catch(() => null));
+      if (raw) return mapProductFromApi(raw);
+    }
+  } catch {
+    // Fallback to list/public endpoint below
+  }
+  try {
     const adminList = await listProducts({ limit: 500 });
     const foundAdmin = adminList.find((p) => p.id === id || p.slug === id);
     if (foundAdmin) return foundAdmin;
