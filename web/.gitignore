@@ -5,7 +5,8 @@ build/
 .env
 .env.local
 *.log
-data/
+data/angibell.db-wal
+data/angibell.db-shm
 !.gitignore
 .impeccable/mocks/
 .impeccable/review/
