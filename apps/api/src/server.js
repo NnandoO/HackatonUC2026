@@ -113,17 +113,6 @@ export function createServer() {
                 return;
             }
 
-            // 0. GET / or /simulator -> Servir Simulador Web WhatsApp
-            if (method === 'GET' && (pathname === '/' || pathname === '/simulator')) {
-                const htmlPath = path.resolve(__dirname, 'simulator.html');
-                if (fs.existsSync(htmlPath)) {
-                    const html = fs.readFileSync(htmlPath, 'utf-8');
-                    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
-                    res.end(html);
-                    return;
-                }
-            }
-
             // 0.05 GET /api/qr-status -> Estado y QR de WppConnect
             if (method === 'GET' && pathname === '/api/qr-status') {
                 const qrData = await wppConnectService.getQrCode();
@@ -178,7 +167,6 @@ export function createServer() {
 
     <div style="margin-top: 20px;">
       <button class="btn-reload" onclick="checkStatus()">Actualizar QR ⟳</button>
-      <a href="/simulator" style="color: #25d366; text-decoration: none; font-size: 12px; margin-left: 15px;">Ir al Simulador Web →</a>
     </div>
   </div>
 

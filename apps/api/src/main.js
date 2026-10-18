@@ -40,7 +40,6 @@ async function bootstrap() {
         console.log(`Endpoints base:`);
         console.log(`• Health:     http://${HOST}:${PORT}/v1/health`);
         console.log(`• QR WhatsApp:http://${HOST}:${PORT}/qr`);
-        console.log(`• Simulador:  http://${HOST}:${PORT}/simulator`);
         console.log(`• Catálogo:   http://${HOST}:${PORT}/v1/products`);
         console.log(`• Pedidos:    http://${HOST}:${PORT}/v1/orders`);
         console.log(`• Chatbot:    http://${HOST}:${PORT}/v1/conversations`);

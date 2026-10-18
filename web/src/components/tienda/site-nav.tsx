@@ -4,7 +4,6 @@ import { MSG_CATALOGO, waLink } from "@/lib/wa";
 
 const enlaces: Array<[string, string]> = [
   ["Catálogo", "/catalogo"],
-  ["Probar asesora", "/simulator"],
   ["Piezas de hoy", "/#piezas"],
   ["Panel", "/panel"],
 ];

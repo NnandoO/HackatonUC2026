@@ -34,10 +34,9 @@ La tienda y el motor comercial pueden ejecutarse juntos desde `web/`:
 bash scripts/start-demo.sh
 ```
 
-La web queda en `http://localhost:3000`; el chat de demostración está en
-`/simulator` y el panel de administración en `/panel`. La API comercial solo
-queda accesible desde el propio equipo en `localhost:4000`. El puente de
-WhatsApp inicia desactivado. Para respuestas generadas por IA se debe agregar
+La web queda en `http://localhost:3000` y el panel de administración en
+`/panel`. La API comercial solo queda accesible desde el propio equipo en
+`localhost:4000`. El puente de WhatsApp inicia desactivado. Para respuestas generadas por IA se debe agregar
 `OPENROUTER_API_KEY` a `web/.env`; sin esa clave, el proveedor no podrá responder.
 El script crea claves locales aleatorias para el panel, Paperclip, PostgreSQL y el cifrado de tokens Meta. Las credenciales se guardan en `web/.env`; no compartir ese archivo.
 
