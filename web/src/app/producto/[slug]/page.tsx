@@ -25,7 +25,9 @@ export default async function ProductoPage({ params }: Props) {
   const producto = await getProductBySlug(slug);
   if (!producto || producto.status !== "publicado") notFound();
   const pub = toPublicProduct(producto);
-  const precio = formatPrecio(pub.priceCents, pub.currency);
+  const precio = pub.priceCents > 0
+    ? formatPrecio(pub.priceCents, pub.currency)
+    : "Precio por confirmar";
   const otros = (await listProducts({ status: "publicado", limit: 200 }))
     .filter((p) => p.slug !== pub.slug)
     .slice(0, 3)
@@ -79,6 +81,7 @@ export default async function ProductoPage({ params }: Props) {
                 stock: v.stock,
                 stockFuente: v.stockFuente,
               }))}
+              stockEstimado={pub.stockEstimado}
             />
           </div>
         </div>

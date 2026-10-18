@@ -49,7 +49,9 @@ export default async function Home() {
     );
   }
 
-  const precioHero = formatPrecio(hero.priceCents, hero.currency);
+  const precioHero = hero.priceCents > 0
+    ? formatPrecio(hero.priceCents, hero.currency)
+    : "Precio por confirmar";
   const primeraTalla =
     hero.variants.find((v) => v.stock > 0)?.size ?? hero.variants[0]?.size ?? "Única";
   const [tituloA, ...tituloResto] = hero.name.split(" ");
@@ -91,7 +93,7 @@ export default async function Home() {
               {hero.description}
             </p>
             <div className="rotulo mt-7 text-[11px] text-tinta-suave">Tallas disponibles</div>
-            <TallaChips variantes={hero.variants} className="mt-2" />
+            <TallaChips variantes={hero.variants} className="mt-2" stockEstimado={hero.stockEstimado} />
             <div className="relative mt-10 max-w-[560px]">
               <div className="trazo-tiza">
                 <FotoPieza
@@ -104,7 +106,7 @@ export default async function Home() {
               <Alfiler className="-right-2 -top-2" />
               <Alfiler className="-left-2 -bottom-2" />
               <div className="num absolute -left-3 bottom-8 rotate-[-4deg] border-[1.5px] border-tinta bg-papel px-3 py-2 text-[12px]">
-                Talla {primeraTalla} · {precioHero}
+              Talla {primeraTalla.toLowerCase() === "por definir" ? "por confirmar" : primeraTalla} · {precioHero}
               </div>
             </div>
           </div>
@@ -117,11 +119,12 @@ export default async function Home() {
               {fechaCorta(hero.createdAt)}
             </Sello>
             <h2 className="font-display text-[clamp(32px,3.4vw,46px)] leading-[1.06]">
-              El stock que ves es real, no una promesa.
+              {hero.stockEstimado ? "Stock de demostración, por confirmar." : "El stock que ves es real, no una promesa."}
             </h2>
             <p className="max-w-[42ch] text-[16px] leading-relaxed text-tinta-suave">
-              Cada talla muestra sus piezas reales: cuando una se agota se marca, y cuando llega
-              mercadería nueva Angibell lo ajusta en su panel y esta página lo cuenta.
+              {hero.stockEstimado
+                ? "Las cantidades son referenciales para mostrar el catálogo. Confirma disponibilidad, talla y precio por WhatsApp antes de comprar."
+                : "Cada talla muestra sus piezas reales: cuando una se agota se marca, y cuando llega mercadería nueva Angibell lo ajusta en su panel y esta página lo cuenta."}
             </p>
             <div className="num text-[34px]">
               {precioHero}
@@ -133,9 +136,9 @@ export default async function Home() {
               <span className="rotulo text-[11px] text-tinta-suave">la pieza</span>
             </div>
             <p className="num text-[14px] text-tinta-suave">
-              Ahora mismo:{" "}
+              {hero.stockEstimado ? "Stock estimado:" : "Ahora mismo:"}{" "}
               {hero.variants
-                .map((v) => `T${v.size} ${v.stock > 0 ? `${v.stock} disp.` : "agotado"}`)
+                .map((v) => `${v.size.toLowerCase() === "por definir" ? "talla por confirmar" : `T${v.size}`} ${v.stock > 0 ? `${v.stock}${hero.stockEstimado ? " estim." : " disp."}` : "agotado"}`)
                 .join(" · ")}
             </p>
             <div className="mt-2 flex flex-wrap gap-4">
@@ -148,7 +151,7 @@ export default async function Home() {
                 )}
                 className="rotulo border-[1.5px] border-tinta px-6 py-4 text-[12px] transition-colors hover:bg-tiza-suave"
               >
-                Pedir esta pieza
+                {hero.stockEstimado || hero.priceCents <= 0 ? "Consultar por WhatsApp" : "Pedir esta pieza"}
               </a>
             </div>
             <div className="costura mt-2 w-full" />

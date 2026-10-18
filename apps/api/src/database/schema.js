@@ -81,6 +81,8 @@ CREATE TABLE IF NOT EXISTS conversations (
   created_at TEXT NOT NULL
 );
 
+ALTER TABLE conversations ADD COLUMN IF NOT EXISTS shopping_context TEXT NOT NULL DEFAULT '{}';
+
 CREATE TABLE IF NOT EXISTS orders (
   id TEXT PRIMARY KEY,
   actor_id TEXT NOT NULL REFERENCES actors(id),

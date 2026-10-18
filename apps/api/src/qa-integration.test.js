@@ -156,7 +156,7 @@ test('2. Flujo WhatsApp Admin → Web: propose_product + confirm_proposal public
         {
             name: 'Vestido Princesa Huancayo QA',
             description: 'Vestido de tul bordado a mano para fiesta infantil',
-            imageUrls: ['https://images.unsplash.com/photo-1518831959646-742c3a14ebf7?w=800'],
+            imageUrls: ['/media/whatsapp-qa.jpg'],
             variants: [
                 { size: '6', color: 'Palo Rosa', priceCents: 13500, stock: 4 },
                 { size: '8', color: 'Palo Rosa', priceCents: 14500, stock: 2 },
@@ -176,7 +176,7 @@ test('2. Flujo WhatsApp Admin → Web: propose_product + confirm_proposal public
     const confirmRes = await agentService.executeTool(
         'confirm_proposal',
         { proposalId: proposeRes.proposalId },
-        { actorId: adminActorId, conversationId: null, userRole: 'admin' }
+        { actorId: adminActorId, conversationId: null, userRole: 'admin', text: 'CONFIRMAR' }
     );
     assert.equal(confirmRes.success, true);
     assert.equal(confirmRes.status, 'confirmed');
@@ -347,6 +347,7 @@ test('5. Pedidos, Solicitudes de Venta y Pagos Culqi: sales_request → aprobaci
 
     const prod = await webDb.createProduct({
         name: 'Vestido Comunión Celestial QA',
+        imageUrls: ['/media/comunion-celestial-qa.jpg'],
         description: 'Encaje francés blanco perla',
         priceCents: 18000,
         variants: [{ size: '10', color: 'Blanco Perla', stock: 5 }],
@@ -424,6 +425,7 @@ test('5. Pedidos, Solicitudes de Venta y Pagos Culqi: sales_request → aprobaci
 test('6. OAuth de Meta y Salud (/v1/health con PostgreSQL)', async () => {
     process.env.META_APP_ID = '1234567890';
     process.env.META_APP_SECRET = 'meta_secret_qa_test';
+    process.env.META_FACEBOOK_LOGIN_CONFIG_ID = '987654321012345';
     process.env.META_OAUTH_REDIRECT_URI = `${baseUrl}/v1/admin/meta/facebook/oauth/callback`;
     process.env.META_TOKEN_ENCRYPTION_KEY = '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef';
 
@@ -431,6 +433,8 @@ test('6. OAuth de Meta y Salud (/v1/health con PostgreSQL)', async () => {
     assert.ok(oauthStart.authorizationUrl.startsWith('https://www.facebook.com/'));
 
     const parsedAuthUrl = new URL(oauthStart.authorizationUrl);
+    assert.equal(parsedAuthUrl.searchParams.get('config_id'), process.env.META_FACEBOOK_LOGIN_CONFIG_ID);
+    assert.equal(parsedAuthUrl.searchParams.has('scope'), false);
     const state = parsedAuthUrl.searchParams.get('state');
     assert.ok(state, 'beginFacebookOAuth debe incluir parámetro state');
 

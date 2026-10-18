@@ -16,7 +16,7 @@ export class CatalogService {
     async getProducts(options = {}) {
         const limit = Math.min(Math.max(Number(options.limit) || 20, 1), 200);
         const cursor = options.cursor;
-        let sql = `SELECT * FROM products WHERE status = 'published'`;
+        let sql = `SELECT * FROM products WHERE status = 'published' AND jsonb_array_length(image_urls::jsonb) > 0`;
         const params = [];
         if (cursor) {
             sql += ` AND created_at < $1`;

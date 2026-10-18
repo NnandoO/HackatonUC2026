@@ -1,3 +1,4 @@
+import { limaDate, resolveDeliveryDate } from './delivery-date.js';
 import crypto from 'node:crypto';
 import { db } from '../database/db.js';
 import { orderService } from './order.service.js';
@@ -18,7 +19,11 @@ export class SalesService {
     if (method === 'delivery' && (!zone || !address)) {
       throw new Error('INVALID_INPUT: Para delivery necesito distrito/zona y dirección.');
     }
-    const requestedDate = String(input.requestedDate || '').trim().slice(0, 80);
+    const rawRequestedDate = String(input.requestedDate || '').trim().slice(0, 80);
+    const requestedDate = rawRequestedDate ? resolveDeliveryDate(rawRequestedDate) : '';
+    if (rawRequestedDate && (!requestedDate || requestedDate < limaDate())) {
+      throw new Error('INVALID_INPUT: La fecha solicitada debe ser válida y no puede estar en el pasado.');
+    }
     const seen = new Set();
     let subtotalCents = 0;
     const checked = [];
@@ -184,17 +189,60 @@ export class SalesService {
     });
   }
 
+  async prepareAdminConfirmation(id, adminActorId, conversationId = null) {
+    const admin = await db.queryOne("SELECT id FROM actors WHERE id=$1 AND role='admin'", [adminActorId]);
+    if (!admin) throw new Error('FORBIDDEN: Solo la administradora puede revisar ventas.');
+    const row = await db.queryOne("SELECT * FROM sales_requests WHERE id=$1 AND status='pending'", [id]);
+    if (!row) throw new Error('NOT_FOUND: No hay una solicitud pendiente.');
+    const date = resolveDeliveryDate(row.requested_date);
+    if (!date || date < limaDate()) throw new Error('INVALID_INPUT: El cliente debe indicar una fecha de entrega vigente.');
+    let shippingCents = row.delivery_method === 'pickup' ? 0 : row.shipping_cents;
+    if (shippingCents === null || shippingCents === undefined) {
+      const normalizeZone = value => String(value || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/^el\s+/, '').trim();
+      const previous = await db.query("SELECT delivery_zone,shipping_cents FROM sales_requests WHERE status='approved' AND delivery_method='delivery' AND shipping_cents IS NOT NULL ORDER BY reviewed_at DESC LIMIT 100");
+      shippingCents = previous.find(item => normalizeZone(item.delivery_zone) === normalizeZone(row.delivery_zone))?.shipping_cents;
+    }
+    if (!Number.isSafeInteger(shippingCents) || shippingCents < 0) throw new Error('DELIVERY_RATE_MISSING: No hay tarifa validada para esa zona.');
+    const action = { kind: 'sale', requestId: id, deliveryDate: date, shippingCents, subtotalCents: row.subtotal_cents, expiresAt: new Date(Date.now() + 30 * 60000).toISOString() };
+    if (!conversationId) {
+      const conv = await db.queryOne("SELECT id FROM conversations WHERE actor_id=$1 AND channel='whatsapp' ORDER BY created_at DESC LIMIT 1", [adminActorId]);
+      conversationId = conv?.id;
+      if (!conversationId) {
+        conversationId = crypto.randomUUID();
+        await db.execute("INSERT INTO conversations(id,actor_id,channel,created_at) VALUES($1,$2,'whatsapp',$3)", [conversationId, adminActorId, new Date().toISOString()]);
+      }
+    }
+    await db.execute("UPDATE conversations SET shopping_context=(shopping_context::jsonb || jsonb_build_object('pendingAdminAction',$1::jsonb))::text WHERE id=$2", [JSON.stringify(action), conversationId]);
+    const items = JSON.parse(row.items_json);
+    const money = cents => `S/ ${(cents / 100).toFixed(2)}`;
+    const replyText = items.map(item => `${item.name} ×${item.quantity}`).join('\n') +
+      `\n${row.delivery_method === 'delivery' ? `Delivery: ${row.delivery_zone} · ${row.delivery_address}` : 'Recojo en tienda'}` +
+      `\nFecha: ${date}\nPrendas: ${money(row.subtotal_cents)} · Envío: ${money(shippingCents)}\nTotal: ${money(row.subtotal_cents + shippingCents)}\n\nResponde CONFIRMAR.`;
+    return { action, replyText };
+  }
+
+  async confirmPreparedSale(conversationId, adminActorId) {
+    const conv = await db.queryOne('SELECT shopping_context FROM conversations WHERE id=$1 AND actor_id=$2', [conversationId, adminActorId]);
+    const action = JSON.parse(conv?.shopping_context || '{}').pendingAdminAction;
+    if (action?.kind !== 'sale' || new Date(action.expiresAt) < new Date()) throw new Error('INVALID_INPUT: Consulta las solicitudes pendientes para confirmar su resumen vigente.');
+    const approval = await this.approveRequest(action.requestId, adminActorId, action);
+    await db.execute("UPDATE conversations SET shopping_context=(shopping_context::jsonb - 'pendingAdminAction' || jsonb_build_object('lastConfirmedSale',$1::text))::text WHERE id=$2", [approval.id, conversationId]);
+    approval.customerNotification = await this.notifyCustomer(approval.id);
+    return { ...approval, replyText: `Solicitud aprobada. Total: S/ ${(approval.totalCents / 100).toFixed(2)}. Fecha: ${approval.deliveryDate}.` + (approval.customerNotification.sent ? ' Cliente avisado con su enlace de pago de prueba.' : ' El aviso al cliente está pendiente de envío.') };
+  }
+
   async notifyAdmin(request) {
     if (process.env.WHATSAPP_BRIDGE_ENABLED !== 'true') {
       return { sent: false, reason: 'whatsapp_bridge_disabled' };
     }
     const adminPhone = process.env.SALES_ADMIN_PHONE || '51995992450';
     const { wppConnectService } = await import('./wppconnect.service.js');
-    const summary = request.items.map(item => `${item.name} (${item.sku}) ×${item.quantity}`).join(', ');
-    return wppConnectService.sendMessage(adminPhone,
-      `🛍️ Nueva solicitud de venta ${request.id}\n${summary}\nSubtotal: S/ ${(request.subtotalCents / 100).toFixed(2)}\n` +
-      `${request.deliveryMethod === 'delivery' ? `Delivery: ${request.deliveryZone}` : 'Recojo'}\n` +
-      `Fecha solicitada: ${request.requestedDate || 'sin indicar'}\nRevisa fecha, envío y stock antes de aprobar.`);
+    const admin = await db.queryOne('SELECT actor_id FROM authorized_admins WHERE phone=$1 AND active=1', [adminPhone.startsWith('+') ? adminPhone : `+${adminPhone}`]);
+    if (!admin) throw new Error('FORBIDDEN: No hay administradora autorizada.');
+    let preview;
+    try { preview = await this.prepareAdminConfirmation(request.id, admin.actor_id); }
+    catch (error) { return wppConnectService.sendMessage(adminPhone, `Nueva solicitud pendiente. ${error.message}`); }
+    return wppConnectService.sendMessage(adminPhone, `🛍️ Nueva solicitud\n${preview.replyText}`);
   }
 
   async notifyCustomer(id) {
@@ -202,7 +250,7 @@ export class SalesService {
       return { sent: false, reason: 'whatsapp_bridge_disabled' };
     }
     const row = await db.queryOne(
-      `SELECT s.*, a.phone FROM sales_requests s JOIN actors a ON a.id = s.actor_id WHERE s.id = $1`,
+      `SELECT s.*, a.phone, c.shopping_context FROM sales_requests s JOIN actors a ON a.id = s.actor_id LEFT JOIN conversations c ON c.id=s.conversation_id WHERE s.id = $1`,
       [id]
     );
     if (!row || row.status !== 'approved' || row.notification_sent_at || !row.phone) return { sent: false };
@@ -218,7 +266,8 @@ export class SalesService {
       `Delivery/recojo: ${row.delivery_method === 'delivery' ? row.delivery_zone : 'recojo'}.\n` +
       `Envío: S/ ${(row.shipping_cents / 100).toFixed(2)}. Total: S/ ${(totalCents / 100).toFixed(2)}.\n` +
       (checkoutLink ? `Enlace de pago de prueba: ${checkoutLink}` : 'Te enviaremos el enlace de pago por separado.');
-    const result = await wppConnectService.sendMessage(row.phone, message);
+    const transport = JSON.parse(row.shopping_context || '{}');
+    const result = await wppConnectService.sendMessage(transport.whatsappSender || row.phone, message, Boolean(transport.whatsappIsLid));
     if (result?.error) return { sent: false, error: result.error };
     await db.execute(
       `UPDATE sales_requests SET notification_sent_at = $1 WHERE id = $2 AND notification_sent_at IS NULL`,

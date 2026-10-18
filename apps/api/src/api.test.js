@@ -1,3 +1,5 @@
+import { limaDate, resolveDeliveryDate } from './services/delivery-date.js';
+import { updateShoppingContext, resolveShoppingContext } from './services/shopping-context.service.js';
 import test, { before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
@@ -6,9 +8,10 @@ import { orderService } from './services/order.service.js';
 import { paymentService } from './services/payment.service.js';
 import { proposalService } from './services/proposal.service.js';
 import { checkIdempotency, saveIdempotency } from './middleware/idempotency.js';
-import { createAdminSession } from './middleware/auth.js';
+import { createAdminSession, getAuthContext } from './middleware/auth.js';
 import { db } from './database/db.js';
-import { agentService, isWithinAngibellScope } from './services/agent.service.js';
+import { agentService, isWithinAngibellScope, extractCatalogSize } from './services/agent.service.js';
+import { socialService } from './services/social.service.js';
 import { salesService } from './services/sales.service.js';
 import { createServer, verifyMetaSignature } from './server.js';
 import { runSeed } from './seed.js';
@@ -88,6 +91,54 @@ test('Catalog: creates draft with slug, supports status transition, and requires
     assert.ok(publicListAfter.items.some(p => p.id === prod.id));
     const bySlug = await catalogService.getProductBySlug(prod.slug);
     assert.equal(bySlug?.id, prod.id);
+});
+
+test('Catalog: refuses orders until a published product has a confirmed positive price', async () => {
+    const adminId = crypto.randomUUID();
+    const product = await catalogService.createProduct({
+        name: 'Vestido Sin Precio Confirmado',
+        description: 'Prueba de protección contra precio cero',
+        variants: [{
+            sku: `UNPRICED-${crypto.randomUUID()}`,
+            size: 'Por definir',
+            color: 'Por definir',
+            price: { amountCents: 0, currency: 'PEN' },
+            stock: 5,
+        }],
+    }, adminId);
+    const proposal = await proposalService.createProposal({
+        kind: 'publish_product',
+        productId: product.id,
+        expectedVersion: product.version,
+    }, adminId);
+    await proposalService.confirmProposal(proposal.id, adminId, 'CONFIRM');
+
+    await assert.rejects(() => orderService.createOrder({
+        items: [{ variantId: product.variants[0].id, quantity: 1 }],
+        channel: 'test',
+    }, crypto.randomUUID()), /PRODUCT_PRICE_UNSET/);
+});
+
+test('WhatsApp admin tools require admin role and exact Instagram publication confirmation', async () => {
+    const denied = await agentService.executeTool('create_social_draft', {}, {
+        actorId: crypto.randomUUID(), conversationId: null, userRole: 'customer', text: 'publica'
+    });
+    assert.match(denied.error, /solo la administradora/);
+
+    const unpricedProposal = await agentService.executeTool('propose_product', {
+        name: 'Vestido en espera de precio',
+        variants: [{ size: 'S', color: 'Verde', stock: 10 }],
+    }, {
+        actorId: crypto.randomUUID(), conversationId: null, userRole: 'admin', text: 'Registra este vestido'
+    });
+    assert.match(unpricedProposal.error, /precio real/);
+
+    const missingConfirmation = await agentService.executeTool('publish_instagram_draft', {
+        draftId: crypto.randomUUID()
+    }, {
+        actorId: crypto.randomUUID(), conversationId: null, userRole: 'admin', text: 'Quiero publicar en Instagram'
+    });
+    assert.match(missingConfirmation.error, /CONFIRMAR INSTAGRAM/);
 });
 
 test('Order: transactional stock reservation and out-of-stock guard (including concurrent requests)', async () => {
@@ -332,5 +383,242 @@ test('HTTP Server: /v1/health, auto-SKU creation, status PATCH, slug lookup, and
         assert.ok(listPubBody.items.some(p => p.product_id === created.id));
     } finally {
         await new Promise((resolve) => server.close(resolve));
+    }
+});
+
+
+test('One CONFIRMAR publishes the requested web product and Instagram without multiplying total stock', async () => {
+    const actorId = crypto.randomUUID();
+    const context = { actorId, userRole: 'admin', text: 'Publica en la web e instagram, el stock es de 10 piezas y el precio 200 soles', storedImageUrls: ['/media/test-dress.jpg'] };
+    const proposed = await agentService.executeTool('propose_product', {
+        name: 'Vestido prueba confirmación única',
+        variants: ['4', '6', '8', '10'].map(size => ({ size, color: 'Verde', priceCents: 20000, stock: 10 }))
+    }, context);
+    assert.equal(proposed.success, true);
+    const row = await db.queryOne('SELECT action_payload FROM admin_proposals WHERE id = $1', [proposed.proposalId]);
+    const action = JSON.parse(row.action_payload);
+    assert.equal(action.publishInstagram, true);
+    const variants = await db.query('SELECT * FROM variants WHERE product_id = $1', [action.productId]);
+    assert.equal(variants.length, 1);
+    assert.equal(variants[0].stock_on_hand, 10);
+    assert.equal(variants[0].size, 'Por confirmar');
+    assert.deepEqual(JSON.parse((await db.queryOne('SELECT image_urls FROM products WHERE id = $1', [action.productId])).image_urls), ['/media/test-dress.jpg']);
+    const originalPublish = socialService.publishInstagramDraft;
+    let published = 0;
+    socialService.publishInstagramDraft = async draftId => {
+        published++;
+        assert.ok(draftId);
+        return { status: 'published', mediaId: 'test-media-id' };
+    };
+    try {
+        const outcome = await agentService.processMessage({ ...context, text: 'CONFIRMAR' });
+        assert.match(outcome.replyText, /Publicado en la web y en Instagram/);
+        assert.equal(published, 1);
+        assert.equal((await db.queryOne('SELECT status FROM products WHERE id = $1', [action.productId])).status, 'published');
+        const repeated = await agentService.processMessage({ ...context, text: 'CONFIRMAR' });
+        assert.match(repeated.replyText, /No hay una publicación pendiente/);
+        assert.equal(published, 1);
+    } finally {
+        socialService.publishInstagramDraft = originalPublish;
+    }
+});
+
+test('Catalog lookup finds white dresses by plural query and returns exact price and size', async () => {
+    const actorId = crypto.randomUUID();
+    const product = await catalogService.createProduct({
+        name: 'Vestido Blanco Catálogo QA', description: 'Inventario provisional de demostración',
+        imageUrls: ['/media/vestido-blanco-qa.jpg'],
+        variants: [{ size: '10', color: 'Blanco', price: { amountCents: 12500, currency: 'PEN' }, stock: 3 }]
+    }, actorId);
+    const proposal = await proposalService.createProposal({ kind: 'publish_product', productId: product.id, expectedVersion: product.version }, actorId);
+    await proposalService.confirmProposal(proposal.id, actorId, 'CONFIRM');
+    const result = await agentService.executeTool('search_catalog', { query: 'vestidos blancos', size: '10' }, { userRole: 'customer' });
+    const item = result.items.find(item => item.productId === product.id);
+    assert.ok(item);
+    assert.equal(item.priceSoles, '125.00');
+    assert.equal(item.size, '10');
+    assert.equal(item.stockEstimated, true);
+});
+
+
+test('Seed keeps only the owner phone as administrator and revokes other administrator sessions', async () => {
+    const removed = await createAdminSession('+51933023008');
+    await runSeed();
+    const active = await db.query('SELECT phone FROM authorized_admins WHERE active = 1');
+    assert.deepEqual(active.map(row => row.phone), ['+51995992450']);
+    assert.equal((await db.queryOne('SELECT role FROM actors WHERE id = $1', [removed.actorId])).role, 'customer');
+    const auth = await getAuthContext({ method: 'GET', headers: { authorization: `Bearer ${removed.token}` } });
+    assert.equal(auth.role, 'customer');
+});
+
+
+test('Catalog size parsing never reads the plural word tallas as size S', () => {
+    assert.equal(extractCatalogSize('[Nota de voz]: "Hola, quiero precios sobre vestidos blancos, en qué tallas tienes y ya, es nuevo."'), undefined);
+    assert.equal(extractCatalogSize('¿Qué tallas tienes?'), undefined);
+    assert.equal(extractCatalogSize('Quiero talla S'), 'S');
+    assert.equal(extractCatalogSize('¿Tienes vestidos en talla 10?'), '10');
+    assert.equal(extractCatalogSize('tallas 12'), '12');
+    assert.equal(extractCatalogSize('talla: xl'), 'XL');
+});
+
+test('A voice question asking available tallas queries all sizes instead of filtering size S', async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = async () => new Response(JSON.stringify({ choices: [{ message: { content: 'Tenemos opciones con precio y tallas.' } }] }), { status: 200 });
+    try {
+        const result = await agentService.processMessage({
+            conversationId: crypto.randomUUID(), actorId: crypto.randomUUID(), userRole: 'customer',
+            text: '[Nota de voz]: "Hola, quiero precios sobre vestidos blancos, en qué tallas tienes y ya, es nuevo."'
+        });
+        const lookup = result.toolExecutionLog.find(entry => entry.tool === 'search_catalog');
+        assert.ok(lookup.result.count > 0);
+        assert.equal(lookup.result.requestedSize, null);
+        assert.ok(lookup.result.items.some(item => item.size === '10' && item.priceCents === 12500));
+    } finally { globalThis.fetch = originalFetch; }
+});
+
+
+test('Shopping focus keeps Damita for pronouns, size and delivery, and changes only for another chosen model', () => {
+    const products = [{ id: 'damita', name: 'Vestido Blanco Damita', price_cents: 15000 }, { id: 'blanco', name: 'Vestido Blanco', price_cents: 12500 }, { id: 'verde', name: 'Vestido Verde', price_cents: 20000 }];
+    let state = updateShoppingContext({}, '¿En qué tallas viene el vestido blanco, damita?', products);
+    assert.equal(state.productId, 'damita');
+    state = updateShoppingContext(state, 'Quiero uno en talla 10, ¿está disponible todavía?', products);
+    assert.equal(state.productId, 'damita');
+    assert.equal(state.size, '10');
+    state = updateShoppingContext(state, 'Lo quiero con delivery para mañana', products);
+    state = updateShoppingContext(state, 'el vestido blanco de 150 soles', products);
+    assert.equal(state.productId, 'damita');
+    assert.equal(state.size, '10');
+    state = updateShoppingContext(state, 'Prefiero el vestido verde', products);
+    assert.equal(state.productId, 'verde');
+    assert.equal(state.size, undefined);
+});
+
+test('Shopping focus survives unrelated turns and is persisted in the conversation', async () => {
+    const actorId = crypto.randomUUID(), conversationId = crypto.randomUUID();
+    const now = new Date().toISOString();
+    await db.execute("INSERT INTO actors(id,role,created_at) VALUES($1,'customer',$2)", [actorId, now]);
+    await db.execute("INSERT INTO conversations(id,actor_id,channel,created_at) VALUES($1,$2,'whatsapp',$3)", [conversationId, actorId, now]);
+    const selected = await resolveShoppingContext(conversationId, 'Vestido Blanco Catálogo QA');
+    assert.ok(selected.productId);
+    await resolveShoppingContext(conversationId, 'Quiero uno en talla 10');
+    for (let i = 0; i < 10; i++) await resolveShoppingContext(conversationId, 'Lo quiero con delivery para mañana');
+    const restored = JSON.parse((await db.queryOne('SELECT shopping_context FROM conversations WHERE id=$1', [conversationId])).shopping_context);
+    assert.equal(restored.productId, selected.productId);
+    assert.equal(restored.size, '10');
+    const wrongVariant = await db.queryOne('SELECT id FROM variants WHERE product_id <> $1 LIMIT 1', [selected.productId]);
+    const blocked = await agentService.executeTool('create_order', { items: [{ variantId: wrongVariant.id, quantity: 1 }] }, { userRole: 'customer', actorId, conversationId, selectedProductId: selected.productId, selectedSize: '10' });
+    assert.match(blocked.error, /no corresponde al producto/);
+});
+
+test('Public catalog hides products without photos while keeping their data available to administration', async () => {
+    const actorId = crypto.randomUUID();
+    const product = await catalogService.createProduct({ name: 'Sin fotografía QA', variants: [{ size: '10', color: 'Blanco', price: { amountCents: 10000, currency: 'PEN' }, stock: 2 }] }, actorId);
+    const proposal = await proposalService.createProposal({ kind: 'publish_product', productId: product.id, expectedVersion: product.version }, actorId);
+    await proposalService.confirmProposal(proposal.id, actorId, 'CONFIRM');
+    assert.equal((await catalogService.getProducts({ limit: 200 })).items.some(item => item.id === product.id), false);
+    assert.ok(await catalogService.getProductById(product.id));
+    const result = await agentService.executeTool('search_catalog', { query: 'Sin fotografía QA' }, { userRole: 'customer' });
+    assert.equal(result.count, 0);
+});
+
+
+test('Delivery dates use the current Lima calendar and reject obsolete requested dates', async () => {
+    const reference = new Date('2026-10-19T02:00:00Z');
+    assert.equal(limaDate(reference), '2026-10-18');
+    assert.equal(resolveDeliveryDate('lo quiero para mañana', reference), '2026-10-19');
+    assert.equal(resolveDeliveryDate('pasado mañana', reference), '2026-10-20');
+    assert.equal(resolveDeliveryDate('2023/10/31', reference), '2023-10-31');
+    assert.equal(resolveDeliveryDate('31/02/2026', reference), null);
+    const state = updateShoppingContext({}, 'Lo quiero con delivery para mañana', [], reference);
+    assert.equal(state.requestedDate, '2026-10-19');
+    await assert.rejects(() => salesService.createRequest({ items: [{ variantId: 'unused', quantity: 1 }], deliveryMethod: 'pickup', requestedDate: '2023-10-31' }, crypto.randomUUID()), /no puede estar en el pasado/);
+});
+
+test('A query for one size still reports every stocked size of the matching product', async () => {
+    const actorId = crypto.randomUUID();
+    const product = await catalogService.createProduct({ name: 'Prenda tallas completas QA', imageUrls: ['/media/sizes-qa.jpg'], variants: ['4', '6', '10'].map(size => ({ size, color: 'Blanco', price: { amountCents: 15000, currency: 'PEN' }, stock: 2 })) }, actorId);
+    const proposal = await proposalService.createProposal({ kind: 'publish_product', productId: product.id, expectedVersion: product.version }, actorId);
+    await proposalService.confirmProposal(proposal.id, actorId, 'CONFIRM');
+    const result = await agentService.executeTool('search_catalog', { size: '10' }, { userRole: 'customer', catalogProductId: product.id });
+    assert.equal(result.count, 1);
+    assert.deepEqual([...result.items[0].availableSizes].sort(), ['10', '4', '6']);
+});
+
+test('Requesting the complete catalog removes the focused-product filter', async () => {
+    const actorId = crypto.randomUUID(), conversationId = crypto.randomUUID();
+    const now = new Date().toISOString();
+    await db.execute("INSERT INTO actors(id,role,created_at) VALUES($1,'customer',$2)", [actorId, now]);
+    await db.execute("INSERT INTO conversations(id,actor_id,channel,created_at) VALUES($1,$2,'whatsapp',$3)", [conversationId, actorId, now]);
+    const chosen = await resolveShoppingContext(conversationId, 'Prenda tallas completas QA');
+    assert.ok(chosen.productId);
+    const context = await resolveShoppingContext(conversationId, 'Muestra el catálogo completo');
+    assert.equal(context.lookupProductId, null);
+});
+
+test('More preserves catalog filters and advances its persisted page', async () => {
+    const actorId = crypto.randomUUID(), conversationId = crypto.randomUUID();
+    const now = new Date().toISOString();
+    await db.execute("INSERT INTO actors(id,role,created_at) VALUES($1,'customer',$2)", [actorId, now]);
+    await db.execute("INSERT INTO conversations(id,actor_id,channel,created_at) VALUES($1,$2,'whatsapp',$3)", [conversationId, actorId, now]);
+    const first = await resolveShoppingContext(conversationId, '¿Qué vestidos blancos tienes?');
+    assert.equal(first.catalogOffset, 0);
+    assert.equal(first.catalogQuery, 'blancos');
+    const second = await resolveShoppingContext(conversationId, 'más');
+    assert.equal(second.catalogOffset, 5);
+    assert.equal(second.catalogQuery, 'blancos');
+    assert.equal(second.lookupProductId, null);
+    assert.equal((await resolveShoppingContext(conversationId, 'muéstrame más')).catalogOffset, 10);
+    assert.equal((await resolveShoppingContext(conversationId, 'Muéstrame el catálogo completo')).catalogOffset, 0);
+    assert.equal(isWithinAngibellScope('más', [{ role: 'assistant', text: 'Tenemos vestidos blancos. Escribe más para ver otros modelos.' }]), true);
+});
+
+test('Administrator approves a prepared sale by saying only CONFIRMAR, including a voice note', async () => {
+    const admin = await createAdminSession('+51995992450');
+    const conversationId = crypto.randomUUID();
+    await db.execute("INSERT INTO conversations(id,actor_id,channel,created_at) VALUES($1,$2,'whatsapp',$3)", [conversationId, admin.actorId, new Date().toISOString()]);
+    const variant = await db.queryOne("SELECT v.id FROM variants v JOIN products p ON p.id=v.product_id WHERE p.name='Prenda tallas completas QA' AND v.size='4'");
+    const request = await salesService.createRequest({ items: [{ variantId: variant.id, quantity: 1 }], deliveryMethod: 'pickup', requestedDate: '2099-01-02' }, crypto.randomUUID());
+    const preview = await salesService.prepareAdminConfirmation(request.id, admin.actorId, conversationId);
+    assert.match(preview.replyText, /Responde CONFIRMAR/);
+    assert.equal(preview.action.shippingCents, 0);
+    const reply = await agentService.processMessage({ conversationId, actorId: admin.actorId, userRole: 'admin', text: '[Nota de voz]: "Confirmar"' });
+    assert.match(reply.replyText, /Solicitud aprobada/);
+    assert.equal((await db.queryOne('SELECT status FROM sales_requests WHERE id=$1', [request.id])).status, 'approved');
+    const repeat = await agentService.processMessage({ conversationId, actorId: admin.actorId, userRole: 'admin', text: 'CONFIRMAR' });
+    assert.match(repeat.replyText, /ya está aprobada/);
+});
+
+test('Delivery confirmation reuses a previously approved tariff for the same normalized zone', async () => {
+    const admin = await createAdminSession('+51995992450');
+    const variant = await db.queryOne("SELECT v.id FROM variants v JOIN products p ON p.id=v.product_id WHERE p.name='Prenda tallas completas QA' AND v.size='6'");
+    const request = await salesService.createRequest({ items: [{ variantId: variant.id, quantity: 1 }], deliveryMethod: 'delivery', deliveryZone: 'Tambo', deliveryAddress: 'Dirección de prueba', requestedDate: '2099-01-02' }, crypto.randomUUID());
+    const preview = await salesService.prepareAdminConfirmation(request.id, admin.actorId);
+    assert.equal(preview.action.shippingCents, 1000);
+    assert.match(preview.replyText, /Total: S\/ 160.00/);
+    assert.match(preview.replyText, /Fecha: 2099-01-02/);
+});
+
+test('Approved-sale notification keeps the customer WhatsApp LID transport', async () => {
+    const row = await db.queryOne("SELECT * FROM sales_requests WHERE status='approved' AND delivery_method='pickup' ORDER BY created_at DESC LIMIT 1");
+    const conversationId = crypto.randomUUID();
+    await db.execute("UPDATE actors SET phone='+123456789012345' WHERE id=$1", [row.actor_id]);
+    await db.execute("INSERT INTO conversations(id,actor_id,channel,created_at,shopping_context) VALUES($1,$2,'whatsapp',$3,$4)", [conversationId, row.actor_id, new Date().toISOString(), JSON.stringify({ whatsappSender: '123456789012345', whatsappIsLid: true })]);
+    await db.execute('UPDATE sales_requests SET conversation_id=$1,notification_sent_at=NULL WHERE id=$2', [conversationId, row.id]);
+    const { wppConnectService } = await import('./services/wppconnect.service.js');
+    const originalSend = wppConnectService.sendMessage;
+    const originalEnabled = process.env.WHATSAPP_BRIDGE_ENABLED;
+    let target;
+    process.env.WHATSAPP_BRIDGE_ENABLED = 'true';
+    wppConnectService.sendMessage = async (phone, text, isLid) => { target = { phone, text, isLid }; return {}; };
+    try {
+        const result = await salesService.notifyCustomer(row.id);
+        assert.equal(result.sent, true);
+        assert.equal(target.phone, '123456789012345');
+        assert.equal(target.isLid, true);
+        assert.match(target.text, /fue aprobada/);
+    } finally {
+        wppConnectService.sendMessage = originalSend;
+        if (originalEnabled === undefined) delete process.env.WHATSAPP_BRIDGE_ENABLED;
+        else process.env.WHATSAPP_BRIDGE_ENABLED = originalEnabled;
     }
 });

@@ -41,6 +41,9 @@ export class OrderService {
                 if (v.product_status !== 'published') {
                     throw new Error(`CONFLICT: El producto "${v.product_name}" no está publicado para la venta.`);
                 }
+                if (v.price_cents <= 0) {
+                    throw new Error(`PRODUCT_PRICE_UNSET: El precio de "${v.product_name}" todavía no está confirmado; no se puede generar un pedido.`);
+                }
                 const available = v.stock_on_hand - v.stock_reserved;
                 if (available < item.quantity) {
                     throw new Error(`OUT_OF_STOCK: Stock insuficiente para SKU ${v.sku}. Disponibles: ${available}, Solicitados: ${item.quantity}.`);

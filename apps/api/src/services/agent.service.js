@@ -1,8 +1,12 @@
+import { limaDate } from './delivery-date.js';
 import crypto from 'node:crypto';
 import { db } from '../database/db.js';
 import { catalogService } from './catalog.service.js';
 import { proposalService } from './proposal.service.js';
 import { salesService } from './sales.service.js';
+import { socialService } from './social.service.js';
+import { extractCatalogSize, resolveShoppingContext, isMoreCatalogRequest } from './shopping-context.service.js';
+export { extractCatalogSize } from './shopping-context.service.js';
 
 const getOpenRouterApiKey = () => process.env.OPENROUTER_API_KEY || '';
 const getOpenRouterModel = () => process.env.OPENROUTER_MODEL || 'openai/gpt-4o-mini';
@@ -23,7 +27,7 @@ const SCOPE_TERMS = [
 ];
 
 const SOCIAL_GREETING = /^(hola|buen(?:os|as) (?:d[ií]as|tardes|noches)|gracias|ok|okay|listo|s[ií]|no|por favor|ayuda|quiero informaci[oó]n)[!.?,\s]*$/i;
-const FOLLOW_UP = /^(?:y\s+)?(?:ese|esa|eso|este|esta|el|la|los|las|uno|una|otro|otra|cu[aá]nt[oa]s?|hay|quiero|prefiero|mu[eé]strame|dame|agrega|cambia|confirma|confirmar|listo|s[ií]|no|\d{1,2}|rosa|rojo|azul|blanco|negro|lila|para el|en el|jr\.|av\.|calle|urbanizaci[oó]n|S\/\s*\d+)\b/i;
+const FOLLOW_UP = /^(?:y\s+)?(?:m[aá]s|siguientes|ver m[aá]s|otros|otras|ese|esa|eso|este|esta|el|la|los|las|uno|una|otro|otra|cu[aá]nt[oa]s?|hay|quiero|prefiero|mu[eé]strame|dame|agrega|cambia|confirma|confirmar|listo|s[ií]|no|\d{1,2}|rosa|rojo|azul|blanco|negro|lila|para el|en el|jr\.|av\.|calle|urbanizaci[oó]n|S\/\s*\d+)\b/i;
 
 function normalizeScopeText(value) {
   return String(value || '')
@@ -204,6 +208,20 @@ const TOOLS_SCHEMA = [
         required: ['productId', 'facebookCopy']
       }
     }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'publish_instagram_draft',
+      description: 'Publica en Instagram un borrador revisado. Solo usar si la administradora envía exactamente CONFIRMAR INSTAGRAM seguido del ID del borrador.',
+      parameters: {
+        type: 'object',
+        properties: {
+          draftId: { type: 'string', description: 'ID del borrador mostrado previamente a la administradora' }
+        },
+        required: ['draftId']
+      }
+    }
   }
 ];
 
@@ -217,24 +235,34 @@ export class AgentService {
     switch (name) {
       case 'search_catalog': {
         const query = args.query ? args.query.toLowerCase() : '';
-        const size = args.size ? String(args.size).trim() : null;
+        const normalizedSize = args.size ? String(args.size).trim().toUpperCase().replace(/^TALLAS?\s+/, '') : '';
+        const size = /^(?:\d{1,2}|XXL|XL|XS|S|M|L)$/.test(normalizedSize) ? normalizedSize : null;
         let sql = `
           SELECT p.id as product_id, p.name, p.description, p.image_urls,
                  v.id as variant_id, v.sku, v.size, v.color, v.price_cents,
-                 v.stock_on_hand, v.stock_reserved
+                 v.stock_on_hand, v.stock_reserved,
+                 (SELECT json_agg(av.size ORDER BY av.size) FROM variants av WHERE av.product_id = p.id AND av.stock_on_hand > av.stock_reserved) AS all_sizes
           FROM products p
           JOIN variants v ON v.product_id = p.id
-          WHERE p.status = 'published'
+          WHERE p.status = 'published' AND jsonb_array_length(p.image_urls::jsonb) > 0
         `;
         const params = [];
-        if (query) {
-          sql += ` AND (LOWER(p.name) LIKE ? OR LOWER(p.description) LIKE ? OR LOWER(v.color) LIKE ?)`;
-          params.push(`%${query}%`, `%${query}%`, `%${query}%`);
+        if (context.catalogProductId && userRole === 'customer') {
+          sql += ' AND p.id = ?';
+          params.push(context.catalogProductId);
+        }
+        const words = query.normalize('NFD').replace(/[\u0300-\u036f]/g, '').split(/[^a-z0-9]+/)
+          .filter(word => word.length > 2 && !['para', 'una', 'uno', 'las', 'los', 'del', 'que', 'tiene', 'tienes', 'tendra', 'precio', 'vestidos'].includes(word))
+          .map(word => word === 'blancos' ? 'blanco' : word === 'vestido' ? 'vestido' : word);
+        for (const word of words) {
+          sql += ` AND translate(LOWER(p.name || ' ' || p.description || ' ' || v.color), 'áéíóúüñ', 'aeiouun') LIKE ?`;
+          params.push(`%${word}%`);
         }
         if (size) {
-          sql += ` AND v.size = ?`;
+          sql += ` AND (v.size = ? OR LOWER(v.size) IN ('por definir', 'por confirmar'))`;
           params.push(size);
         }
+        sql += ' ORDER BY p.name ASC, p.id, v.size';
         const rows = await db.query(sql, params);
         const results = rows.map(r => ({
           productId: r.product_id,
@@ -242,33 +270,59 @@ export class AgentService {
           variantId: r.variant_id,
           sku: r.sku,
           size: r.size,
+          availableSizes: r.all_sizes || [],
           color: r.color,
           priceSoles: (r.price_cents / 100).toFixed(2),
           priceCents: r.price_cents,
           availableStock: Math.max(0, r.stock_on_hand - r.stock_reserved),
+          stockEstimated: /inventario provisional de demostración/i.test(r.description || ''),
+          sizeNeedsConfirmation: /por (definir|confirmar)/i.test(r.size || ''),
           image: JSON.parse(r.image_urls || '[]')[0] || null
         }));
-        return { count: results.length, items: results };
+        console.log('[CATALOG_SEARCH]', JSON.stringify({ query, size, matches: results.length }));
+        return { requestedSize: size, count: results.length, items: results };
       }
 
       case 'propose_product': {
         if (userRole !== 'admin') {
           return { error: 'Acceso denegado: solo la dueña administradora puede registrar productos.' };
         }
-        const variantsData = (args.variants || []).map((v, i) => ({
+        let rawVariants = Array.isArray(args.variants) ? args.variants : [];
+        // A total stock without an explicit size is one undivided inventory.
+        const totalStock = String(context.text || '').match(/(?:stock\s*(?:es\s*)?(?:de\s*)?|hay\s+)(\d+)\s*(?:piezas|unidades|en stock)?/i);
+        if (totalStock && !/\btallas?\b/i.test(context.text || '') && rawVariants.length) {
+          rawVariants = [{ ...rawVariants[0], size: 'Por confirmar', stock: Number(totalStock[1]) }];
+        }
+        if (rawVariants.some((v) => !Number.isFinite(Number(v.priceCents)) || Number(v.priceCents) <= 0)) {
+          return { error: 'Falta confirmar el precio real en soles para cada talla. No registraré un precio inventado.' };
+        }
+        if (rawVariants.some((v) => !Number.isInteger(Number(v.stock)) || Number(v.stock) < 0)) {
+          return { error: 'Indica el stock para cada talla antes de guardar la propuesta.' };
+        }
+        const variantsData = rawVariants.map((v, i) => ({
           sku: v.sku || `ANG-${Date.now().toString().slice(-4)}-T${v.size}-${i + 1}`,
           size: String(v.size),
           color: v.color || 'Estándar',
-          price: { amountCents: Number(v.priceCents) || 12000, currency: 'PEN' },
-          stock: Number(v.stock) || 1
+          price: { amountCents: Number(v.priceCents), currency: 'PEN' },
+          stock: Number(v.stock)
         }));
 
+        const productImages = context.storedImageUrls?.length > 0
+          ? context.storedImageUrls : (args.imageUrls || []).filter(url => typeof url === 'string' && url.startsWith('/media/'));
+        if (!productImages.length) {
+          const existing = await db.queryOne(
+            `SELECT ap.*, p.name FROM admin_proposals ap JOIN products p ON p.id = (ap.action_payload::jsonb->>'productId')
+             WHERE ap.actor_id = $1 AND ap.status = 'pending' AND p.name = $2 ORDER BY ap.created_at DESC LIMIT 1`,
+            [actorId, args.name || 'Nuevo Producto Angibell']
+          );
+          if (existing) return { success: true, proposalId: existing.id, confirmationRequired: true,
+            replyText: `${existing.name}: la propuesta con tu foto ya está preparada. Responde CONFIRMAR.` };
+          return { error: 'No hay una foto de WhatsApp asociada a este producto. Envía la foto para preparar la publicación.' };
+        }
         const product = await catalogService.createProduct({
           name: args.name || 'Nuevo Producto Angibell',
           description: args.description || `Prenda confeccionada por Angibell en Huancayo`,
-          imageUrls: context.storedImageUrls?.length > 0 ? context.storedImageUrls : args.imageUrls && args.imageUrls.length > 0 ? args.imageUrls : [
-            'https://images.unsplash.com/photo-1518831959646-742c3a14ebf7?auto=format&fit=crop&w=800&q=80'
-          ],
+          imageUrls: productImages,
           source: 'whatsapp',
           variants: variantsData
         }, actorId);
@@ -276,9 +330,11 @@ export class AgentService {
         const proposal = await proposalService.createProposal({
           kind: 'publish_product',
           productId: product.id,
-          expectedVersion: product.version
+          expectedVersion: product.version,
+          publishInstagram: /instagram|\big\b/i.test(context.text || '')
         }, actorId);
 
+        if (conversationId) await db.execute("UPDATE conversations SET shopping_context=(shopping_context::jsonb || jsonb_build_object('pendingAdminAction',$1::jsonb))::text WHERE id=$2", [JSON.stringify({ kind: 'product', proposalId: proposal.id }), conversationId]);
         return {
           success: true,
           proposalId: proposal.id,
@@ -286,7 +342,8 @@ export class AgentService {
           variants: variantsData.map(v => `Talla ${v.size} (${v.color}) - S/ ${(v.price.amountCents / 100).toFixed(2)} - Stock: ${v.stock}`),
           expiresAt: proposal.expiresAt,
           summary: proposal.summary,
-          confirmationRequired: true
+          confirmationRequired: true,
+          replyText: `${product.name} · S/ ${(variantsData[0]?.price.amountCents / 100).toFixed(2)} · Stock total: ${variantsData.reduce((n, v) => n + v.stock, 0)}.\n${/instagram|\big\b/i.test(context.text || '') ? 'Lo publicaré en la web y en Instagram con esta foto.' : 'Lo publicaré en la web con esta foto.'}\nResponde CONFIRMAR.`
         };
       }
 
@@ -294,29 +351,31 @@ export class AgentService {
         if (userRole !== 'admin') {
           return { error: 'Acceso denegado: solo la dueña puede confirmar propuestas.' };
         }
-        let propId = args.proposalId;
-        if (!propId) {
-          // Look up latest pending proposal for actor
-          const latest = await db.queryOne(
-            `SELECT id FROM admin_proposals WHERE actor_id = $1 AND status = 'pending' ORDER BY created_at DESC LIMIT 1`,
-            [actorId]
-          );
-          if (!latest) {
-            const anyPending = await db.queryOne(
-              `SELECT id FROM admin_proposals WHERE status = 'pending' ORDER BY created_at DESC LIMIT 1`
-            );
-            if (anyPending) {
-              propId = anyPending.id;
-            } else {
-              return { error: 'No tienes ninguna propuesta pendiente por confirmar en este momento.' };
-            }
-          } else {
-            propId = latest.id;
+        if (!/^(?:confirmar|confirmo|confirm)[.!\s]*$/i.test(String(context.text || '').trim())) {
+          return { error: 'Responde CONFIRMAR para aprobar la publicación.' };
+        }
+        const pending = args.proposalId
+          ? await db.queryOne(`SELECT * FROM admin_proposals WHERE id = $1 AND actor_id = $2`, [args.proposalId, actorId])
+          : await db.queryOne(`SELECT * FROM admin_proposals WHERE actor_id = $1 AND status = 'pending' ORDER BY created_at DESC LIMIT 1`, [actorId]);
+        if (!pending) return { error: 'No hay una publicación pendiente de confirmar.' };
+        const propId = pending.id;
+        const requestedAction = JSON.parse(pending.action_payload);
+        const outcome = await proposalService.confirmProposal(propId, actorId, 'CONFIRM');
+        let instagram = null;
+        if (requestedAction.publishInstagram && outcome.socialDraft) {
+          try {
+            instagram = await socialService.publishInstagramDraft(outcome.socialDraft.id);
+          } catch (error) {
+            instagram = { status: 'failed', error: error.message };
           }
         }
-
-        const outcome = await proposalService.confirmProposal(propId, actorId, 'CONFIRM');
         return {
+          instagram,
+          replyText: instagram?.status === 'published'
+            ? 'Publicado en la web y en Instagram. ✅'
+            : instagram?.status === 'failed'
+              ? `Publicado en la web. Instagram no confirmó la publicación: ${instagram.error}`
+              : 'Publicado en la web. ✅',
           success: true,
           proposalId: propId,
           status: 'confirmed',
@@ -335,7 +394,15 @@ export class AgentService {
 
       case 'create_order': {
         if (userRole !== 'customer') return { error: 'Esta herramienta es para solicitudes de clientes.' };
-        const request = await salesService.createRequest(args, actorId, conversationId);
+        if (context.selectedProductId) {
+          for (const item of args.items || []) {
+            const variant = await db.queryOne('SELECT product_id,size FROM variants WHERE id = $1', [item.variantId]);
+            if (!variant || variant.product_id !== context.selectedProductId || (context.selectedSize && variant.size !== context.selectedSize)) {
+              return { error: 'La variante no corresponde al producto y talla elegidos. Conserva la selección del cliente y consulta sus variantes.' };
+            }
+          }
+        }
+        const request = await salesService.createRequest({ ...args, requestedDate: context.requestedDate || args.requestedDate }, actorId, conversationId);
         try { await salesService.notifyAdmin(request); } catch (error) {
           console.error('No se pudo avisar la solicitud de venta a la administradora:', error.message);
         }
@@ -350,7 +417,10 @@ export class AgentService {
 
       case 'list_pending_sales': {
         if (userRole !== 'admin') return { error: 'Acceso denegado.' };
-        return { items: await salesService.listPending() };
+        const items = await salesService.listPending();
+        if (!items.length) return { items, replyText: 'No hay solicitudes de venta pendientes.' };
+        const prepared = await salesService.prepareAdminConfirmation(items[0].id, actorId, conversationId);
+        return { items, replyText: `${items.length > 1 ? `Hay ${items.length} solicitudes pendientes. Primera:\n` : ''}${prepared.replyText}` };
       }
 
       case 'approve_sale': {
@@ -382,15 +452,19 @@ export class AgentService {
       }
 
       case 'create_social_draft': {
+        if (userRole !== 'admin') return { error: 'Acceso denegado: solo la administradora puede preparar publicaciones.' };
         let prod = null;
         if (args.productId) {
           prod = await db.queryOne(`SELECT * FROM products WHERE id = $1`, [args.productId]);
         }
         if (!prod) {
-          prod = await db.queryOne(`SELECT * FROM products ORDER BY created_at DESC LIMIT 1`);
+          return { error: 'Indica el producto exacto que quieres publicar; no voy a elegir uno automáticamente.' };
         }
-        if (!prod) {
-          return { error: 'No se encontró un producto para asociar a la publicación.' };
+        if (prod.status !== 'published') {
+          return { error: 'Primero confirma y publica el producto en la tienda.' };
+        }
+        if (Number(prod.price_cents) <= 0) {
+          return { error: 'Falta confirmar el precio del producto antes de preparar su publicación.' };
         }
 
         const draftId = crypto.randomUUID();
@@ -412,6 +486,20 @@ export class AgentService {
         };
       }
 
+      case 'publish_instagram_draft': {
+        if (userRole !== 'admin') return { error: 'Acceso denegado: solo la administradora puede publicar en Instagram.' };
+        const draftId = String(args.draftId || '').trim();
+        const confirmation = String(context.text || '').trim();
+        const confirmationId = confirmation.match(/^(?:CONFIRMAR|PUBLICAR)\s+INSTAGRAM\s+([A-Za-z0-9-]+)$/i)?.[1];
+        if (!draftId || confirmationId !== draftId) {
+          return { error: 'Para publicar, revisa el borrador y escribe exactamente: CONFIRMAR INSTAGRAM <ID del borrador>.' };
+        }
+        const draft = await db.queryOne(`SELECT id, status FROM social_drafts WHERE id = $1`, [draftId]);
+        if (!draft) return { error: 'No se encontró ese borrador de Instagram.' };
+        if (draft.status !== 'prepared') return { error: `El borrador no está listo para publicar (estado: ${draft.status}).` };
+        return await socialService.publishInstagramDraft(draftId);
+      }
+
       default:
         return { error: `Herramienta desconocida: ${name}` };
     }
@@ -421,6 +509,23 @@ export class AgentService {
    * Procesa un mensaje conversacional usando el modelo de OpenRouter
    */
   async processMessage({ conversationId, actorId, userRole, text, imageUrls = [], storedImageUrls = [], channel = 'whatsapp' }) {
+    const adminCommand = text.replace(/^\[nota de voz\]:\s*/i, '').replace(/^["“]|["”]$/g, '').trim();
+    if (userRole === 'admin' && /^(?:confirmar|confirmo|confirm)[.!\s]*$/i.test(adminCommand)) {
+      try {
+        const conv = await db.queryOne('SELECT shopping_context FROM conversations WHERE id=$1 AND actor_id=$2', [conversationId, actorId]);
+        const context = JSON.parse(conv?.shopping_context || '{}');
+        if (context.pendingAdminAction?.kind === 'sale') {
+          const result = await salesService.confirmPreparedSale(conversationId, actorId);
+          return { replyText: result.replyText, toolExecutionLog: [{ tool: 'approve_sale', result }] };
+        }
+        if (context.lastConfirmedSale && !context.pendingAdminAction) return { replyText: 'Esa solicitud ya está aprobada.', toolExecutionLog: [] };
+        const result = await this.executeTool('confirm_proposal', { proposalId: context.pendingAdminAction?.proposalId }, { actorId, conversationId, userRole, text: adminCommand });
+        return { replyText: result.replyText || result.error, proposal: null, orderId: null, handoff: false,
+          toolExecutionLog: [{ tool: 'confirm_proposal', result }] };
+      } catch (error) {
+        return { replyText: `No se completó la confirmación: ${error.message}`, toolExecutionLog: [] };
+      }
+    }
     // 1. Obtener historial reciente de mensajes
     const historyRows = await db.query(
       `SELECT role, text, created_at FROM messages
@@ -440,16 +545,18 @@ export class AgentService {
       };
     }
 
+    const shoppingContext = userRole === 'customer' ? await resolveShoppingContext(conversationId, text) : {};
+
     // 2. Construir prompt del sistema
     const systemPrompt = userRole === 'admin'
       ? `Eres el Asistente Administrativo de Angibell 360, operando directamente en el WhatsApp de la dueña del taller y tienda de confecciones Angibell en Huancayo, Perú.
 Tu función es ayudar a la dueña a gestionar su negocio desde mensajes de WhatsApp (fotos, voz o texto).
 Capacidades:
 1. Registrar productos: Si la dueña describe un nuevo vestido o prenda (o envía fotos/medidas), extrae el nombre, descripción, variantes (talla, color, precio en céntimos y stock) y llama a 'propose_product'.
-2. Confirmar propuestas: Cuando la dueña dice "CONFIRMAR", "Sí", "Listo", "Publicar" o similar para aprobar una propuesta pendiente, llama a 'confirm_proposal'.
+2. Confirmar propuestas: Cuando la dueña responde "CONFIRMAR" para aprobar una propuesta pendiente, llama a 'confirm_proposal'. No inventes precios ni stock faltantes; pídelos.
 3. Consultar inventario/stock: Si pregunta por existencias, llama a 'search_catalog'.
-4. Generar publicaciones de redes sociales: Si pide armar o revisar el post de redes, llama a 'create_social_draft'.
-5. Ventas: consulta solicitudes con 'list_pending_sales'. Solo después de validar personalmente fecha y costo de delivery usa 'approve_sale'. Si no se puede atender, usa 'reject_sale' con motivo. No inventes fechas, zonas, tarifas ni confirmaciones.
+4. Publicaciones de Instagram: Si pide registrar y publicar una foto en web e Instagram, usa 'propose_product'. Su único CONFIRMAR publicará en ambos destinos solicitados. Presenta un resumen breve de precio y stock y termina con 'Responde CONFIRMAR'. No pidas IDs ni confirmaciones adicionales. Si no indica talla, usa una sola variante 'Por confirmar' y conserva el stock total; nunca inventes tallas ni repartas o multipliques unidades.
+5. Ventas: consulta solicitudes con 'list_pending_sales' para mostrar el resumen preparado. Solo pide CONFIRMAR para aprobar: la fecha proviene de la solicitud y el envío de la tarifa ya validada para la zona. No pidas IDs, que escriba comandos, fecha ni costo de nuevo. Si no hay tarifa o fecha válida, informa qué dato falta sin inventarlo. Para rechazar usa 'reject_sale' con motivo.
 
 Límite estricto:
 - Responde únicamente sobre la operación de Angibell. Rechaza programación, tareas académicas, cultura general, política y cualquier asunto personal o ajeno al negocio.
@@ -475,11 +582,23 @@ Límite estricto:
 
 Tono:
 - Muy cálido, respetuoso y empático (ej: "¡Hola! Qué gusto saludarte 🌸", "Con mucho gusto te ayudo a elegir el vestido perfecto para tu pequeña").
-- Precios claros en Soles (PEN).`;
+- Precios claros en Soles (PEN).\n- En WhatsApp muestra cinco modelos por mensaje y ofrece ver más. Al responder más, muestra el siguiente grupo sin repetir los anteriores. Resume cada uno en nombre, precio y una sola línea con las tallas; no repitas precio y stock por talla. Usa negrita de WhatsApp con un asterisco, sin tablas ni encabezados Markdown.
+- En WhatsApp no escribas enlaces Markdown de imágenes ni inventes dominios o URLs. Las fotos se adjuntan solo si el cliente las pide explícitamente; consultar catálogo, precios o tallas no solicita una foto. Si necesitas mencionar la tienda, su única URL es https://angibell.soryntel.com.`;
 
     const messages = [
-      { role: 'system', content: systemPrompt }
+      { role: 'system', content: systemPrompt + `\nFecha actual en Perú: ${limaDate()}. Calcula fechas relativas desde hoy; nunca inventes el año.` }
     ];
+    if (shoppingContext.productId) messages.push({ role: 'system', content: `Selección persistente del cliente: ${JSON.stringify(shoppingContext)}. Mantén este mismo producto al hablar de talla, cantidad, precio y delivery. No vuelvas a ofrecer otros vestidos ni preguntes cuál eligió. Solo cambia de modelo cuando el cliente lo indique. Consulta sus variantes antes de preparar una solicitud.` });
+    // Supply current inventory even when the model omits its catalog tool call.
+    let prefetchedCatalog = null;
+    if (userRole === 'customer' && (isMoreCatalogRequest(text) || /vestid|prenda|precio|talla|stock|disponib|cat[aá]logo|tienes|tendr[aá]|foto|fotito|imagen/i.test(text))) {
+      const color = isMoreCatalogRequest(text) ? shoppingContext.catalogQuery : text.match(/\b(blanc[oa]s?|verd[ea]s?|roj[oa]s?|azul(?:es)?|rosad[oa]s?|rosas?|negr[oa]s?|lilas?)\b/i)?.[1];
+      const explicitSize = isMoreCatalogRequest(text) ? shoppingContext.catalogSize : extractCatalogSize(text) || (shoppingContext.catalogBrowsing || /\btallas\b/i.test(text) ? undefined : shoppingContext.size);
+      prefetchedCatalog = await this.executeTool('search_catalog', { query: color || '', size: explicitSize }, { actorId, conversationId, userRole, catalogProductId: shoppingContext.lookupProductId });
+      prefetchedCatalog.pageOffset = shoppingContext.catalogOffset || 0;
+      prefetchedCatalog.catalogBrowsing = shoppingContext.catalogBrowsing;
+      messages.push({ role: 'system', content: `Catálogo consultado ahora (datos reales de la tienda): ${JSON.stringify(prefetchedCatalog)}. Usa estos productos para responder y ofrecer precios concretos. Precio cero significa precio por confirmar, nunca S/0. Si stockEstimated es true, indica que la disponibilidad es estimada y debe confirmarse. Si sizeNeedsConfirmation es true, no afirmes que la talla está agotada; falta confirmarla. No reutilices afirmaciones anteriores de falta de información.` });
+    }
 
     for (const h of historyRows) {
       if (h.role === 'customer' || h.role === 'admin') {
@@ -503,7 +622,7 @@ Tono:
     let lastProposal = null;
     let lastOrderId = null;
     let isHandoff = false;
-    let toolExecutionLog = [];
+    let toolExecutionLog = prefetchedCatalog ? [{ tool: 'search_catalog', result: prefetchedCatalog }] : [];
 
     try {
       const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
@@ -546,7 +665,8 @@ Tono:
 
           let toolResult;
           try {
-            toolResult = await this.executeTool(fnName, fnArgs, { actorId, conversationId, userRole, storedImageUrls, text });
+            const previousProposal = fnName === 'propose_product' && toolExecutionLog.find(entry => entry.tool === fnName && entry.result?.success);
+            toolResult = previousProposal ? previousProposal.result : await this.executeTool(fnName, fnArgs, { actorId, conversationId, userRole, storedImageUrls, text, catalogProductId: shoppingContext.lookupProductId, selectedProductId: shoppingContext.productId, selectedSize: shoppingContext.size, requestedDate: shoppingContext.requestedDate });
           } catch (error) {
             toolResult = { error: error instanceof Error ? error.message : 'No se pudo completar la operación.' };
           }
@@ -586,7 +706,7 @@ Tono:
         });
 
         const finalCompletion = await finalResponse.json();
-        const replyText = finalCompletion.choices?.[0]?.message?.content || 'Operación completada con éxito.';
+        const replyText = toolExecutionLog.find(entry => entry.result?.replyText)?.result.replyText || finalCompletion.choices?.[0]?.message?.content || 'Operación completada con éxito.';
 
         return {
           replyText,
@@ -603,7 +723,7 @@ Tono:
         proposal: null,
         orderId: null,
         handoff: false,
-        toolExecutionLog: []
+        toolExecutionLog
       };
 
     } catch (err) {

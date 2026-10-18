@@ -10,10 +10,12 @@ export function TallaPicker({
   nombre,
   precio,
   variantes,
+  stockEstimado = false,
 }: {
   nombre: string;
   precio: string;
   variantes: Variante[];
+  stockEstimado?: boolean;
 }) {
   const primeraConStock = variantes.find((v) => v.stock > 0)?.size ?? null;
   const [talla, setTalla] = useState<string | null>(primeraConStock);
@@ -28,7 +30,7 @@ export function TallaPicker({
       <div className="flex flex-wrap items-baseline justify-between gap-2">
         <span className="rotulo text-[12px]">Elige tu talla</span>
         <span className="rotulo text-[10px] text-tinta-suave">
-          stock en tiempo real
+          {stockEstimado ? "stock provisional de demostración" : "stock disponible"}
         </span>
       </div>
       <div className="mt-3 flex flex-wrap gap-2" role="group" aria-label="Tallas disponibles">
@@ -59,13 +61,15 @@ export function TallaPicker({
         <p className="num mt-3 text-[13px] text-tinta-suave">
           {(() => {
             const v = variantes.find((x) => x.size === talla)!;
-            return `${v.stock} ${v.stock === 1 ? "pieza disponible" : "piezas disponibles"} en talla ${talla}`;
+            const tallaLabel = talla.toLowerCase() === "por definir" ? "talla por confirmar" : `talla ${talla}`;
+            if (stockEstimado) return `${v.stock} ${v.stock === 1 ? "unidad estimada" : "unidades estimadas"} · ${tallaLabel}; confirmar existencia real`;
+            return `${v.stock} ${v.stock === 1 ? "pieza disponible" : "piezas disponibles"} en ${tallaLabel}`;
           })()}
         </p>
       )}
       <div className="mt-6 flex flex-wrap gap-4">
         <a href={waLink(mensaje)} className="bt-tiza rotulo px-6 py-4 text-[12px]">
-          {talla ? `Pedir talla ${talla} por WhatsApp` : "Pedir por WhatsApp"}
+          {stockEstimado || precio === "Precio por confirmar" ? "Consultar por WhatsApp" : talla ? `Pedir talla ${talla} por WhatsApp` : "Pedir por WhatsApp"}
         </a>
       </div>
       {todoAgotado && (

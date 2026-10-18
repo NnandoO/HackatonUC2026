@@ -6,6 +6,9 @@ import { Alfiler, FotoPieza } from "./piezas";
 export function PiezaCard({ producto, numero }: { producto: PublicProduct; numero: number }) {
   const agotado = producto.totalStock === 0;
   const pocas = !agotado && producto.totalStock <= 3;
+  const precio = producto.priceCents > 0
+    ? formatPrecio(producto.priceCents, producto.currency)
+    : "Precio por confirmar";
   return (
     <Link href={`/producto/${producto.slug}`} className="pieza-card group block">
       <Alfiler className="left-3 top-3" />
@@ -23,7 +26,7 @@ export function PiezaCard({ producto, numero }: { producto: PublicProduct; numer
         </div>
         <div className="mt-3 flex items-end justify-between gap-3">
           <span className="num text-[19px]">
-            {formatPrecio(producto.priceCents, producto.currency)}
+            {precio}
             {producto.compareAtCents !== null && (
               <s className="rotulo ml-2 align-middle text-[10px] text-tinta-suave decoration-hilo-fuerte">
                 antes {formatPrecio(producto.compareAtCents, producto.currency)}
@@ -40,7 +43,7 @@ export function PiezaCard({ producto, numero }: { producto: PublicProduct; numer
                   : "border-tinta bg-papel"
             )}
           >
-            {agotado ? "agotado" : pocas ? `quedan ${producto.totalStock}` : "en almacén"}
+            {agotado ? "agotado" : producto.stockEstimado ? `stock demo: ${producto.totalStock}` : pocas ? `quedan ${producto.totalStock}` : "en almacén"}
           </span>
         </div>
         <span className="rotulo mt-3 inline-block text-[11px] text-berry opacity-0 transition-opacity group-hover:opacity-100">

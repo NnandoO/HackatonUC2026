@@ -25,9 +25,11 @@ export type PublicProduct = {
   variants: PublicVariant[];
   totalStock: number;
   agotado: boolean;
+  stockEstimado: boolean;
 };
 
 export function toPublicProduct(p: Product): PublicProduct {
+  const stockEstimado = /inventario provisional de demostraci[oó]n/i.test(p.description);
   const variants: PublicVariant[] = p.variants.map((v) => ({
     id: v.id,
     size: v.size,
@@ -53,6 +55,7 @@ export function toPublicProduct(p: Product): PublicProduct {
     variants,
     totalStock,
     agotado: totalStock <= 0,
+    stockEstimado,
   };
 }
 

@@ -1,3 +1,4 @@
+import { isMoreCatalogRequest } from './shopping-context.service.js';
 import { chatService } from './chat.service.js';
 import { db } from '../database/db.js';
 import crypto from 'node:crypto';
@@ -22,11 +23,64 @@ const getGroqApiKey = () => process.env.GROQ_API_KEY || '';
 const DEBOUNCE_WAIT_MS = 3500;    // Ventana de silencio: espera 3.5s tras el último mensaje
 const MAX_BUFFER_WAIT_MS = 10000; // Límite máximo de espera en ráfaga: 10 segundos
 
+export function messageDeduplicationKey(msg) {
+  const rawId = typeof msg.id === 'object' ? msg.id?._serialized : msg.id;
+  if (rawId !== undefined && rawId !== null && String(rawId).trim()) {
+    return String(rawId);
+  }
+
+  // WPPConnect 2.10.42 may omit `id` from received-message Socket.IO events.
+  // Keep processing those messages and build a stable key from the available fields.
+  const sender = String(msg.from || msg.chatId || msg.sender?.id || '').trim();
+  const eventTime = msg.clientReceivedTsMillis ?? msg.serverStoreTimeMicros ?? msg.timestamp ?? msg.t;
+  const type = String(msg.type || '').trim();
+  if (!sender || eventTime === undefined || eventTime === null || !type) return null;
+
+  const body = String(msg.body || msg.content || msg.caption || '');
+  const identity = [msg.session || '', sender, String(eventTime), type, body].join('\0');
+  return `fallback:${crypto.createHash('sha256').update(identity).digest('hex')}`;
+}
+
+export function formatWhatsAppCatalog(chatResult, text) {
+  const tools = chatResult.toolExecutionLog || [];
+  if (tools.some(entry => entry.tool !== 'search_catalog') || (!isMoreCatalogRequest(text) && !/foto|fotito|imagen|vestid|tallas?|precios?|cat[aá]logo|mu[eé]str/i.test(text))) return null;
+  const groups = new Map();
+  for (const entry of tools) for (const item of entry.result?.items || []) {
+    if (!item.productId) continue;
+    let group = groups.get(item.productId);
+    if (!group) { group = { name: item.productName, image: item.image, items: new Map() }; groups.set(item.productId, group); }
+    group.items.set(item.variantId, item);
+  }
+  if (!groups.size) return null;
+  const normalize = value => String(value || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
+  const words = normalize(text).split(/[^a-z0-9]+/).filter(word => word.length > 3);
+  const score = group => normalize(group.name).split(' ').filter(word => words.includes(word)).length;
+  const photoRequest = /foto|fotito|imagen/i.test(text) && !/\b(?:sin|no)\s+(?:me\s+)?(?:mandes?\s+|env[ií]es?\s+)?(?:fotos?|imagenes|imágenes)\b/i.test(text);
+  const page = tools.find(entry => entry.result?.pageOffset !== undefined)?.result || {};
+  const offset = photoRequest ? 0 : Math.max(0, Number(page.pageOffset) || 0);
+  const ranked = [...groups.values()].sort((a, b) => page.catalogBrowsing ? a.name.localeCompare(b.name, 'es') : score(b) - score(a));
+  const selected = photoRequest ? ranked.slice(0, 1) : ranked.slice(offset, offset + 5);
+  if (!selected.length) return { replyText: 'Ya viste todos los modelos de esta búsqueda. ¿Cuál te interesa?', image: null };
+  const hasMore = !photoRequest && offset + selected.length < ranked.length;
+  let estimated = false;
+  const lines = selected.map(group => {
+    const items = [...group.items.values()];
+    estimated ||= items.some(item => item.stockEstimated);
+    const prices = items.map(item => Number(item.priceCents)).filter(price => price > 0);
+    const price = prices.length ? `S/ ${(Math.min(...prices) / 100).toFixed(2)}` : 'Precio por confirmar';
+    const sizes = [...new Set(items.flatMap(item => item.availableSizes?.length ? item.availableSizes : [item.size]))].sort((a, b) => String(a).localeCompare(String(b), 'es', { numeric: true }));
+    return `*${group.name}* · ${price}\nTallas: ${sizes.join(', ')}.`;
+  });
+  const replyText = lines.join('\n\n') + (estimated ? '\n\nDisponibilidad estimada; la confirmamos al pedir.' : '') + (hasMore ? '\n\nEscribe “más” para ver otros modelos.' : photoRequest ? '' : selected.length > 1 ? '\n¿Cuál te gusta?' : '');
+  return { replyText, image: photoRequest ? selected[0].image || null : null };
+}
+
 export class WppConnectService {
   token = null;
   ws = null;
   processedMsgIds = new Set();
   sentByBotIds = new Set();
+  sentTextFingerprints = new Map();
   phoneQueues = new Map();
   userBuffers = new Map();
 
@@ -34,10 +88,47 @@ export class WppConnectService {
     return new Promise(resolve => setTimeout(resolve, ms));
   }
 
-  async isAuthorizedAdmin(senderPhone) {
-    const formattedPhone = `+${String(senderPhone || '').replace(/[^0-9]/g, '')}`;
-    const row = await db.queryOne(`SELECT phone FROM authorized_admins WHERE phone = $1 AND active = 1`, [formattedPhone]);
-    return Boolean(row);
+  async resolveAuthorizedAdminPhone(senderPhone, isLid = false) {
+    const digits = String(senderPhone || '').replace(/[^0-9]/g, '');
+    if (!digits) return null;
+
+    const findActiveAdmin = async (phone) => db.queryOne(
+      `SELECT phone FROM authorized_admins WHERE phone = $1 AND active = 1`,
+      [phone]
+    );
+
+    const directPhone = `+${digits}`;
+    const directAdmin = await findActiveAdmin(directPhone);
+    if (directAdmin) return directAdmin.phone;
+    if (!isLid) return null;
+
+    // WhatsApp may expose an administrator as a LID instead of their phone.
+    // Resolve that identifier with WPPConnect, then authorize only if the
+    // resulting phone is already present in the explicit admin allowlist.
+    const token = await this.getToken();
+    if (!token) return null;
+    try {
+      const baseUrl = WPP_BASE_URL.replace(/\/$/, '');
+      const lid = encodeURIComponent(`${digits}@lid`);
+      const response = await fetch(`${baseUrl}/api/${SESSION_NAME}/contact/pn-lid/${lid}`, {
+        headers: { Authorization: `Bearer ${token}` },
+        signal: AbortSignal.timeout(5000),
+      });
+      if (!response.ok) return null;
+      const contact = await response.json();
+      const resolvedDigits = String(contact?.phoneNumber?.id || '')
+        .replace(/[^0-9]/g, '');
+      if (!resolvedDigits || contact?.phoneNumber?.server !== 'c.us') return null;
+      const resolvedAdmin = await findActiveAdmin(`+${resolvedDigits}`);
+      return resolvedAdmin?.phone || null;
+    } catch {
+      // Fail closed: a failed LID lookup must never grant administrator access.
+      return null;
+    }
+  }
+
+  async isAuthorizedAdmin(senderPhone, isLid = false) {
+    return Boolean(await this.resolveAuthorizedAdminPhone(senderPhone, isLid));
   }
 
   storeAdminImage(mediaData, declaredMimeType = '') {
@@ -196,6 +287,11 @@ export class WppConnectService {
   async sendMessage(phone, message, isLid = false) {
     const token = await this.getToken();
     const cleanPhone = phone.replace(/[^0-9]/g, '');
+    const fingerprint = crypto.createHash('sha256').update(String(message).trim()).digest('hex');
+    this.sentTextFingerprints.set(fingerprint, Date.now());
+    for (const [key, sentAt] of this.sentTextFingerprints) {
+      if (Date.now() - sentAt > 600000) this.sentTextFingerprints.delete(key);
+    }
     try {
       const res = await fetch(`${WPP_BASE_URL}/api/${SESSION_NAME}/send-message`, {
         method: 'POST',
@@ -214,14 +310,72 @@ export class WppConnectService {
         const msgs = Array.isArray(data.response) ? data.response : [data.response];
         for (const m of msgs) {
           if (m?.id) {
-            this.sentByBotIds.add(m.id);
-            this.processedMsgIds.add(m.id);
+            const sentId = messageDeduplicationKey(m);
+            if (sentId) { this.sentByBotIds.add(sentId); this.processedMsgIds.add(sentId); }
           }
         }
       }
       return data;
     } catch (err) {
       console.error(`Error enviando mensaje WhatsApp a ${phone}:`, err);
+      return { error: err.message };
+    }
+  }
+
+  async sendProductImage(phone, imagePath, caption = '', isLid = false) {
+    // Catalog images are stored under /media. Restrict downloads to our configured
+    // public HTTPS origin so a catalog value cannot make the API fetch arbitrary URLs.
+    const publicBase = String(process.env.PUBLIC_MEDIA_BASE_URL || process.env.PUBLIC_BASE_URL || '').replace(/\/$/, '');
+    if (!publicBase.startsWith('https://') || typeof imagePath !== 'string' || !imagePath.startsWith('/media/')) {
+      console.warn('[WPP] Imagen de producto omitida: falta origen público HTTPS o ruta /media válida.');
+      return { error: 'PUBLIC_MEDIA_URL_NOT_CONFIGURED' };
+    }
+
+    try {
+      const imageUrl = new URL(imagePath, `${publicBase}/`);
+      if (imageUrl.origin !== new URL(publicBase).origin || !imageUrl.pathname.startsWith('/media/')) {
+        return { error: 'INVALID_PRODUCT_IMAGE_URL' };
+      }
+      const imageResponse = await fetch(imageUrl, { signal: AbortSignal.timeout(10000) });
+      if (!imageResponse.ok) return { error: `IMAGE_FETCH_${imageResponse.status}` };
+      const contentType = (imageResponse.headers.get('content-type') || '').split(';')[0].toLowerCase();
+      const extensions = { 'image/jpeg': 'jpg', 'image/png': 'png', 'image/webp': 'webp' };
+      if (!extensions[contentType]) return { error: 'UNSUPPORTED_PRODUCT_IMAGE_TYPE' };
+      const bytes = Buffer.from(await imageResponse.arrayBuffer());
+      if (!bytes.length || bytes.length > 8 * 1024 * 1024) return { error: 'PRODUCT_IMAGE_SIZE_INVALID' };
+
+      const token = await this.getToken();
+      const cleanPhone = phone.replace(/[^0-9]/g, '');
+      const res = await fetch(`${WPP_BASE_URL}/api/${SESSION_NAME}/send-image`, {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          phone: cleanPhone,
+          isLid: Boolean(isLid),
+          filename: `producto.${extensions[contentType]}`,
+          caption: String(caption || '').slice(0, 900),
+          base64: `data:${contentType};base64,${bytes.toString('base64')}`
+        })
+      });
+      const data = await res.json();
+      if (!res.ok || data.error || data.status === 'error') {
+        const error = data.error?.message || data.error?.error || data.message || (typeof data.error === 'string' ? data.error : `WPP_HTTP_${res.status}`);
+        return { error: String(error) };
+      }
+      const fingerprint = crypto.createHash('sha256').update(String(caption || '').trim()).digest('hex');
+      this.sentTextFingerprints.set(fingerprint, Date.now());
+      if (data.response) {
+        const messages = Array.isArray(data.response) ? data.response : [data.response];
+        for (const message of messages) {
+          if (message?.id) {
+            const sentId = messageDeduplicationKey(message);
+            if (sentId) { this.sentByBotIds.add(sentId); this.processedMsgIds.add(sentId); }
+          }
+        }
+      }
+      return data;
+    } catch (err) {
+      console.error(`[WPP] Error enviando imagen de producto a ${phone}:`, err.message);
       return { error: err.message };
     }
   }
@@ -357,8 +511,14 @@ export class WppConnectService {
 
   async handleIncomingMessage(msg) {
     if (!msg) return;
+    const incomingText = String(msg.body || msg.content || '').trim();
+    if (incomingText) {
+      const fingerprint = crypto.createHash('sha256').update(incomingText).digest('hex');
+      const sentAt = this.sentTextFingerprints.get(fingerprint);
+      if (sentAt && Date.now() - sentAt < 600000) return;
+    }
 
-    const msgId = typeof msg.id === 'object' ? msg.id._serialized : msg.id;
+    const msgId = messageDeduplicationKey(msg);
     if (!msgId || this.processedMsgIds.has(msgId) || this.sentByBotIds.has(msgId)) {
       return;
     }
@@ -388,7 +548,7 @@ export class WppConnectService {
     }
 
     if (isImage) {
-      if (!(await this.isAuthorizedAdmin(senderPhone))) {
+      if (!(await this.isAuthorizedAdmin(senderPhone, isLid))) {
         console.log(`🔒 [WppConnect] Imagen de +${senderPhone} ignorada: no es administrador.`);
         return;
       }
@@ -446,8 +606,9 @@ export class WppConnectService {
     await this.sendSeen(senderPhone);
 
     // 3. Detectar rol y usuario
-    const formattedPhone = `+${senderPhone}`;
-    const isAdmin = await this.isAuthorizedAdmin(senderPhone);
+    const adminPhone = await this.resolveAuthorizedAdminPhone(senderPhone, isLid);
+    const formattedPhone = adminPhone || `+${senderPhone}`;
+    const isAdmin = Boolean(adminPhone);
     const role = isAdmin ? 'admin' : 'customer';
 
     // Buscar o crear actor y conversación
@@ -462,6 +623,10 @@ export class WppConnectService {
       actor = { id: actorId, role };
     }
 
+    if (actor.role !== role) {
+      await db.execute('UPDATE actors SET role = $1 WHERE id = $2', [role, actor.id]);
+    }
+
     let conv = await db.queryOne(`SELECT id FROM conversations WHERE actor_id = $1 AND channel = 'whatsapp'`, [actor.id]);
     if (!conv) {
       const convId = crypto.randomUUID();
@@ -472,10 +637,14 @@ export class WppConnectService {
       conv = { id: convId };
     }
 
+    await db.execute("UPDATE conversations SET shopping_context=(shopping_context::jsonb || jsonb_build_object('whatsappSender',$1::text,'whatsappIsLid',$2::boolean))::text WHERE id=$3", [senderPhone, isLid, conv.id]);
+
     // 4. Procesar con el Agente de OpenRouter (análisis unificado de la ráfaga)
     console.log(`🤖 [Anti-Ban] Consultando OpenRouter Agent para ráfaga unificada...`);
     const chatResult = await chatService.postMessage(conv.id, actor.id, { text, imageUrls, storedImageUrls }, role);
-    const replyText = chatResult.message.text;
+    const catalogReply = !isAdmin ? formatWhatsAppCatalog(chatResult, text) : null;
+    const replyText = catalogReply?.replyText || chatResult.message.text.replace(/!\[[^\]]*\]\([^)]*\)/g, '').replace(/\n[ \t]*-[ \t]*(?=\n|$)/g, '').replace(/\*\*/g, '*').trim();
+    if (catalogReply) await db.execute('UPDATE messages SET text = $1 WHERE id = $2', [replyText, chatResult.message.id]);
 
     // 5. Anti-Ban: Simular indicador "Escribiendo..." proporcional a la respuesta
     const typingMs = Math.min(6000, Math.max(2400, Math.floor(replyText.length * 25 + (Math.random() * 800 - 400))));
@@ -491,6 +660,13 @@ export class WppConnectService {
 
     // 7. Envío del mensaje consolidado
     console.log(`[WHATSAPP REAL ENVIANDO RESPUESTA UNIFICADA A +${senderPhone} (isLid=${isLid})]:\n"${replyText.slice(0, 120)}..."\n`);
+    if (catalogReply?.image?.startsWith('/media/')) {
+      const imageResult = await this.sendProductImage(senderPhone, catalogReply.image, replyText, isLid);
+      if (!imageResult?.error) return;
+      console.warn(`[WPP] Foto no enviada: ${imageResult.error}`);
+      await this.sendMessage(senderPhone, `${replyText}\n\nNo pude adjuntar la foto en este momento.`, isLid);
+      return;
+    }
     await this.sendMessage(senderPhone, replyText, isLid);
   }
 

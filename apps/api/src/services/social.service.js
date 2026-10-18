@@ -97,6 +97,24 @@ async function graphRequest(provider, pathname, body) {
     return payload;
 }
 
+async function waitForInstagramContainer(containerId) {
+    const { accessToken, host, apiVersion } = await getCredentials('instagram');
+    for (let attempt = 0; attempt < 7; attempt++) {
+        const response = await fetch(`https://${host}/${apiVersion}/${containerId}?fields=status_code,status`, {
+            headers: { Authorization: `Bearer ${accessToken}` },
+            signal: AbortSignal.timeout(15000),
+        });
+        const payload = await response.json();
+        if (!response.ok || payload.error) throw new Error(`META_CONTAINER_ERROR: ${payload.error?.message || response.status}`);
+        if (payload.status_code === 'FINISHED') return;
+        if (['ERROR', 'EXPIRED', 'PUBLISHED'].includes(payload.status_code)) {
+            throw new Error(`META_CONTAINER_${payload.status_code}: ${payload.status || 'El contenedor no está disponible para publicar.'}`);
+        }
+        if (attempt < 6) await new Promise(resolve => setTimeout(resolve, 5000));
+    }
+    throw new Error('META_CONTAINER_PROCESSING: Instagram todavía está preparando la imagen. No se publicó.');
+}
+
 async function beginPublication(draftId, provider) {
     const existing = await db.queryOne(
         `SELECT * FROM social_publications WHERE draft_id = $1 AND provider = $2`,
@@ -196,7 +214,20 @@ export class SocialService {
             [crypto.createHash('sha256').update(state).digest('hex'), new Date(now.getTime() + 10 * 60_000).toISOString(), now.toISOString()]
         );
         const url = new URL(`https://www.facebook.com/${process.env.META_GRAPH_API_VERSION || 'v26.0'}/dialog/oauth`);
-        url.search = new URLSearchParams({ client_id: process.env.META_APP_ID, redirect_uri: process.env.META_OAUTH_REDIRECT_URI, state, response_type: 'code', scope: 'pages_show_list,pages_read_engagement,pages_manage_posts' }).toString();
+        const authParams = {
+            client_id: process.env.META_APP_ID,
+            redirect_uri: process.env.META_OAUTH_REDIRECT_URI,
+            state,
+            response_type: 'code',
+        };
+        const businessLoginConfigId = process.env.META_FACEBOOK_LOGIN_CONFIG_ID?.trim();
+        if (businessLoginConfigId) {
+            // Facebook Login for Business defines its scopes in a saved Meta configuration.
+            authParams.config_id = businessLoginConfigId;
+        } else {
+            authParams.scope = 'pages_show_list,pages_read_engagement,pages_manage_posts';
+        }
+        url.search = new URLSearchParams(authParams).toString();
         return { authorizationUrl: url.toString() };
     }
 
@@ -286,6 +317,7 @@ export class SocialService {
                     caption: draft.caption,
                 });
                 if (!container.id) throw new Error('META_API_ERROR: Meta no devolvió el contenedor.');
+                await waitForInstagramContainer(container.id);
                 published = await graphRequest(provider, `${accountId}/media_publish`, {
                     creation_id: container.id,
                 });

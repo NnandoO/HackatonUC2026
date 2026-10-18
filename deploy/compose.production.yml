@@ -41,11 +41,14 @@ services:
       WPPCONNECT_BASE_URL: http://angibell-wppconnect:21465
       WPPCONNECT_SECRET_KEY: ${WPPCONNECT_SECRET_KEY:-}
       PANEL_PASSWORD: ${PANEL_PASSWORD:?Set the panel password}
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
+      OPENROUTER_MODEL: ${OPENROUTER_MODEL:-openai/gpt-4o-mini}
       GROQ_API_KEY: ${GROQ_API_KEY:-}
       ANGIBELL_ADMIN_SERVICE_KEY: ${ANGIBELL_ADMIN_SERVICE_KEY:?Set the internal web-to-API key}
       META_PUBLISH_ENABLED: ${META_PUBLISH_ENABLED:-false}
       META_APP_ID: ${META_APP_ID:-}
       META_APP_SECRET: ${META_APP_SECRET:-}
+      META_FACEBOOK_LOGIN_CONFIG_ID: ${META_FACEBOOK_LOGIN_CONFIG_ID:-}
       META_OAUTH_REDIRECT_URI: https://angibell.soryntel.com/v1/admin/meta/facebook/oauth/callback
       META_TOKEN_ENCRYPTION_KEY: ${META_TOKEN_ENCRYPTION_KEY:-}
       META_GRAPH_API_VERSION: ${META_GRAPH_API_VERSION:-v26.0}
@@ -72,7 +75,10 @@ services:
       - angibell
 
   wppconnect:
-    image: wppconnect/wppconnect-server:2.10.42
+    image: angibell-wppconnect:2.10.42-wa-js4.7.1
+    build:
+      context: ..
+      dockerfile: deploy/wppconnect/Dockerfile
     container_name: angibell-wppconnect
     restart: unless-stopped
     environment:
