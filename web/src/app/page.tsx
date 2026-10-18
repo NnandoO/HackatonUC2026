@@ -20,7 +20,12 @@ function fechaCorta(iso: string): string {
 
 export default async function Home() {
   const productos = (await listProducts({ status: "publicado", limit: 200 })).map(toPublicProduct);
-  const hero = productos.find((p) => p.slug === "vestido-rosas") ?? productos[0];
+  const conFoto = productos.filter((p) => p.images.length > 0);
+  const hero =
+    conFoto.find((p) => p.slug === "vestido-rosas") ??
+    conFoto[0] ??
+    productos.find((p) => p.slug === "vestido-rosas") ??
+    productos[0];
   const piezas = productos.filter((p) => p.slug !== hero?.slug).slice(0, 4);
 
   if (!hero) {
