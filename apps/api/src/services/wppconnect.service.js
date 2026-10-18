@@ -6,7 +6,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-export const MEDIA_DIR = path.resolve(__dirname, '../../../../.state/media');
+export const MEDIA_DIR = process.env.MEDIA_DIR || path.resolve(__dirname, '../../../../.state/media');
 const MAX_IMAGE_BYTES = 8 * 1024 * 1024;
 const IMAGE_EXTENSIONS = new Map([
   ['image/jpeg', 'jpg'],

@@ -4,9 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>ANGIBELL 360 — Simulador WhatsApp & Motor de Agentes IA</title>
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
   <style>
     :root {
       --wa-green: #00a884;
@@ -18,7 +16,7 @@
       --card-bg: #202c33;
       --border-color: #2a3942;
       --text-primary: #e9edef;
-      --text-secondary: #8696a0;
+      --text-secondary: #aeb9c0;
       --accent: #25d366;
       --accent-culqi: #00b4d8;
       --danger: #ef4444;
@@ -26,7 +24,7 @@
 
     * { box-sizing: border-box; margin: 0; padding: 0; }
     body {
-      font-family: 'Plus Jakarta Sans', -apple-system, sans-serif;
+      font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
       background: #0c1317;
       color: var(--text-primary);
       height: 100vh;
@@ -53,7 +51,8 @@
     .brand-logo {
       width: 36px;
       height: 36px;
-      background: linear-gradient(135deg, #ec4899, #8b5cf6);
+      background: #25d366;
+      color: #111b21;
       border-radius: 10px;
       display: flex;
       align-items: center;
@@ -62,12 +61,12 @@
       font-size: 18px;
     }
     .brand h1 {
-      font-size: 16px;
+      font-size: 18px;
       font-weight: 700;
       letter-spacing: -0.3px;
     }
     .brand-badge {
-      font-size: 11px;
+      font-size: 12px;
       background: rgba(37, 211, 102, 0.15);
       color: #25d366;
       padding: 2px 8px;
@@ -84,10 +83,6 @@
       background: #25d366;
       border-radius: 50%;
       display: inline-block;
-      animation: pulse 2s infinite;
-    }
-    @keyframes pulse {
-      0% { opacity: 0.4; } 50% { opacity: 1; } 100% { opacity: 0.4; }
     }
 
     .role-selector {
@@ -153,13 +148,13 @@
       font-size: 20px;
       font-weight: bold;
     }
-    .chat-info h3 {
+    .chat-info h2 {
       font-size: 14px;
       font-weight: 600;
     }
     .chat-info span {
-      font-size: 11px;
-      color: #8696a0;
+      font-size: 12px;
+      color: #aeb9c0;
       display: block;
     }
 
@@ -198,8 +193,8 @@
       border-top-left-radius: 0;
     }
     .msg-time {
-      font-size: 10px;
-      color: #667781;
+      font-size: 12px;
+      color: #53636c;
       text-align: right;
       margin-top: 4px;
       display: block;
@@ -244,7 +239,7 @@
       color: var(--text-primary);
       padding: 5px 10px;
       border-radius: 12px;
-      font-size: 11.5px;
+      font-size: 12px;
       cursor: pointer;
       transition: all 0.2s;
     }
@@ -323,7 +318,7 @@
     /* Tool Calling Trace */
     .trace-box {
       font-family: 'JetBrains Mono', monospace;
-      font-size: 11.5px;
+      font-size: 12px;
       background: #0b141a;
       border: 1px solid var(--border-color);
       border-radius: 6px;
@@ -359,7 +354,7 @@
     .stock-badge {
       padding: 2px 6px;
       border-radius: 4px;
-      font-size: 10px;
+      font-size: 12px;
       font-weight: 600;
     }
     .stock-badge.ok { background: rgba(34, 197, 94, 0.2); color: #4ade80; }
@@ -409,18 +404,9 @@
       <div class="brand-logo">A</div>
       <div>
         <h1>ANGIBELL 360</h1>
-        <span style="font-size: 11px; color: var(--text-secondary);">Motor de Ventas & Operaciones WhatsApp</span>
+        <span style="font-size: 12px; color: var(--text-secondary);">Simulador web del motor comercial</span>
       </div>
-      <div class="brand-badge">OpenRouter AI Conectado</div>
-    </div>
-
-    <div class="role-selector">
-      <button class="role-btn active" id="btnAdmin" onclick="switchRole('admin')">
-        👑 Modo Dueña (Admin)
-      </button>
-      <button class="role-btn" id="btnCustomer" onclick="switchRole('customer')">
-        🛍️ Modo Cliente (Venta)
-      </button>
+      <div class="brand-badge">Simulador web · WhatsApp apagado</div>
     </div>
   </header>
 
@@ -428,10 +414,10 @@
     <!-- WhatsApp Chat Screen -->
     <div class="chat-column">
       <div class="chat-header">
-        <div class="chat-avatar" id="headerAvatar">👗</div>
+        <div class="chat-avatar" id="headerAvatar">🛍️</div>
         <div class="chat-info">
-          <h3 id="headerTitle">Angibell Asistente Admin</h3>
-          <span id="headerSub">+51 999 888 777 (Propietaria)</span>
+        <h2 id="headerTitle">Rosita — Asesora Angibell</h2>
+          <span id="headerSub">Conversación de prueba · no envía WhatsApp</span>
         </div>
       </div>
 
@@ -456,10 +442,10 @@
       <div class="card full">
         <div class="section-title">
           <span>⚡ Trazabilidad de Agentes IA (OpenRouter Tool Calling)</span>
-          <span style="font-size: 11px; color: #38bdf8;">openai/gpt-4o-mini</span>
+          <span style="font-size: 12px; color: #7dd3fc;">Asesor conectado · modelo IA opcional</span>
         </div>
         <div class="trace-box" id="toolTraceBox">
-          <div style="color: #64748b;">Esperando interacción... Envía un mensaje en el chat para observar las tools disparadas en vivo.</div>
+          <div style="color: #aeb9c0;">Esperando interacción... Envía un mensaje para observar las acciones disponibles.</div>
         </div>
       </div>
 
@@ -467,7 +453,7 @@
       <div class="card">
         <div class="section-title">
           <span>📦 Catálogo & Stock en Base de Datos</span>
-          <button style="background:none; border:none; color:var(--wa-green); cursor:pointer; font-size:11px;" onclick="fetchCatalog()">Actualizar ⟳</button>
+          <button style="background:none; border:none; color:var(--wa-green); cursor:pointer; font-size:12px;" onclick="fetchCatalog()">Actualizar ⟳</button>
         </div>
         <div style="max-height: 240px; overflow-y: auto;">
           <table class="catalog-table">
@@ -480,7 +466,7 @@
               </tr>
             </thead>
             <tbody id="catalogTableBody">
-              <tr><td colspan="4" style="text-align: center; color: #64748b;">Cargando catálogo...</td></tr>
+              <tr><td colspan="4" style="text-align: center; color: #cbd5e1;">Cargando catálogo...</td></tr>
             </tbody>
           </table>
         </div>
@@ -490,10 +476,9 @@
       <div class="card">
         <div class="section-title">
           <span>📱 Borradores para Meta (Facebook / IG)</span>
-          <button style="background:none; border:none; color:var(--wa-green); cursor:pointer; font-size:11px;" onclick="fetchSocialDrafts()">Actualizar ⟳</button>
         </div>
         <div id="socialDraftsContainer" style="max-height: 240px; overflow-y: auto;">
-          <div style="color: #64748b; font-size: 12px;">Cargando borradores...</div>
+          <div style="color: #aeb9c0; font-size: 12px;">Los borradores se revisan en el panel de administración.</div>
         </div>
       </div>
 
@@ -512,19 +497,10 @@
       });
     }
 
-    let currentRole = 'admin'; // 'admin' | 'customer'
-    let conversations = {
-      admin: null,
-      customer: null
-    };
+    const currentRole = 'customer';
+    let conversations = { customer: null };
 
     const CHIPS = {
-      admin: [
-        { label: "👗 Agregar Vestido Celeste T4 y T6 a S/ 95", text: "Agrega vestido de fiesta celeste, tengo 5 unidades en talla 4 y 4 en talla 6 a 95 soles cada uno" },
-        { label: "✅ Confirmar propuesta pendiente", text: "CONFIRMAR" },
-        { label: "📊 Consultar stock de Vestido Valery", text: "¿Cuánto stock me queda del Vestido de Fiesta Princesa Valery?" },
-        { label: "📲 Preparar post de redes para vestido", text: "Prepara una publicación de Facebook e Instagram para el vestido Princesa Valery" }
-      ],
       customer: [
         { label: "🌸 Ver catálogo de vestidos de fiesta", text: "Hola! ¿Qué vestidos de fiesta para niña tienen disponibles y en qué precios?" },
         { label: "💳 Comprar Vestido Valery Talla 6", text: "Quiero comprar el Vestido de Fiesta Princesa Valery en talla 6, ¿cómo hago el pago?" },
@@ -534,25 +510,17 @@
 
     async function init() {
       await fetchCatalog();
-      await fetchSocialDrafts();
       await loadOrCreateConversation();
       renderChips();
     }
 
     async function loadOrCreateConversation() {
       const endpoint = '/v1/conversations';
-      const token = currentRole === 'admin' 
-        ? 'ang_admin_b19e7e72fd2e92f9e3009a5a2facb6556672fcd706c69439' 
-        : '';
-
       try {
         const res = await fetch(endpoint, {
           method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            ...(token ? { 'Authorization': `Bearer ${token}` } : {})
-          },
-          body: JSON.stringify({ channel: 'whatsapp' })
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ channel: 'web' })
         });
         const data = await res.json();
         conversations[currentRole] = data.id;
@@ -560,33 +528,10 @@
         // Render welcome message
         const container = document.getElementById('messagesContainer');
         container.innerHTML = '';
-        if (currentRole === 'admin') {
-          appendMessage('assistant', `👋 **¡Hola Sra. Angibell!**\nSoy su Asistente Administrativo de Angibell 360.\nPuede enviarme fotos, notas o textos para agregar prendas al catálogo, consultar stock o aprobar publicaciones para Facebook e Instagram.`);
-        } else {
-          appendMessage('assistant', `🌸 **¡Hola! Bienvenida a Angibell Creaciones Huancayo.**\nSoy Rosita, tu asesora de ventas. Confeccionamos hermosos vestidos y conjuntos para niñas de 0 a 14 años.\n¿Buscas alguna prenda o talla en especial?`);
-        }
+        appendMessage('assistant', `🌸 ¡Hola! Bienvenida a Angibell Creaciones Huancayo.\nSoy Rosita, tu asesora de ventas. Confeccionamos vestidos y conjuntos para niñas.\n¿Qué prenda o talla estás buscando?`);
       } catch (err) {
         console.error('Error creando conversación:', err);
       }
-    }
-
-    function switchRole(role) {
-      currentRole = role;
-      document.getElementById('btnAdmin').classList.toggle('active', role === 'admin');
-      document.getElementById('btnCustomer').classList.toggle('active', role === 'customer');
-
-      if (role === 'admin') {
-        document.getElementById('headerAvatar').innerText = '👗';
-        document.getElementById('headerTitle').innerText = 'Angibell Asistente Admin';
-        document.getElementById('headerSub').innerText = '+51 999 888 777 (Propietaria)';
-      } else {
-        document.getElementById('headerAvatar').innerText = '🛍️';
-        document.getElementById('headerTitle').innerText = 'Rosita — Asesora Angibell';
-        document.getElementById('headerSub').innerText = '+51 912 345 678 (Cliente WhatsApp)';
-      }
-
-      renderChips();
-      loadOrCreateConversation();
     }
 
     function renderChips() {
@@ -632,17 +577,10 @@
       const typingBubble = appendMessage('assistant', `<div class="loading-dots">Consultando modelo IA en OpenRouter<span>.</span><span>.</span><span>.</span></div>`);
 
       const convId = conversations[currentRole];
-      const token = currentRole === 'admin' 
-        ? 'ang_admin_b19e7e72fd2e92f9e3009a5a2facb6556672fcd706c69439' 
-        : '';
-
       try {
         const res = await fetch(`/v1/conversations/${convId}/messages`, {
           method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            ...(token ? { 'Authorization': `Bearer ${token}` } : {})
-          },
+          headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             clientMessageId: generateUUID(),
             text,
@@ -654,22 +592,23 @@
         typingBubble.remove();
 
         let extraCard = '';
-        if (data.proposal) {
-          extraCard += `
-            <div class="msg-card">
-              <strong>📋 Propuesta Registrada (${data.proposal.status}):</strong><br>
-              ${data.proposal.summary}<br>
-              <button class="btn-action" onclick="confirmProposal('${data.proposal.id}')">✓ Confirmar Ahora</button>
-            </div>
-          `;
-        }
-
         if (data.orderId) {
           extraCard += `
             <div class="msg-card" style="border-left-color: var(--accent-culqi);">
               <strong>💳 Pedido Generado con Reserva (15 min):</strong><br>
               ID: ${data.orderId.slice(0, 8)}...<br>
               <a href="/checkout/simulated?orderId=${data.orderId}" target="_blank" class="btn-action culqi">Pagar con Culqi (Simulador)</a>
+            </div>
+          `;
+        }
+
+        const saleResult = (data.toolExecutionLog || []).find(item => item.tool === 'create_order')?.result;
+        if (saleResult?.requestId) {
+          extraCard += `
+            <div class="msg-card" style="border-left-color: var(--accent-culqi);">
+              <strong>Solicitud enviada para validación de Angibell</strong><br>
+              Código: ${saleResult.requestId}<br>
+              La administradora confirmará disponibilidad, fecha y envío antes de preparar el enlace de pago.
             </div>
           `;
         }
@@ -690,19 +629,13 @@
           renderTrace(data.toolExecutionLog);
         }
 
-        // Refresh live database and drafts
+        // Refresh the catalog after the conversation.
         fetchCatalog();
-        fetchSocialDrafts();
 
       } catch (err) {
         typingBubble.remove();
         appendMessage('assistant', `⚠️ Error al procesar mensaje: ${err.message}`);
       }
-    }
-
-    function confirmProposal(propId) {
-      document.getElementById('chatInput').value = "CONFIRMAR";
-      sendMessage();
     }
 
     function renderTrace(logs) {
@@ -713,7 +646,7 @@
         item.className = 'trace-item';
         item.innerHTML = `
           <div><span class="trace-tool">🛠️ Tool ejecutada:</span> <strong>${l.tool}()</strong></div>
-          <div style="color: #94a3b8; font-size: 11px;">Args: ${JSON.stringify(l.args)}</div>
+          <div style="color: #cbd5e1; font-size: 12px;">Acción: ${JSON.stringify(l.args)}</div>
           <div class="trace-res">Resultado: ${JSON.stringify(l.result)}</div>
         `;
         traceBox.appendChild(item);
@@ -733,7 +666,7 @@
             const available = v.available;
             const badgeClass = available > 3 ? 'ok' : 'low';
             tr.innerHTML = `
-              <td><strong>${p.name}</strong><br><span style="color:#64748b; font-size:10px;">${v.color}</span></td>
+              <td><strong>${p.name}</strong><br><span style="color:#475569; font-size:12px;">${v.color}</span></td>
               <td>Talla ${v.size}</td>
               <td>S/ ${(v.price.amountCents / 100).toFixed(2)}</td>
               <td><span class="stock-badge ${badgeClass}">${available} un.</span></td>
@@ -743,38 +676,6 @@
         });
       } catch (err) {
         console.error('Error cargando catalogo:', err);
-      }
-    }
-
-    async function fetchSocialDrafts() {
-      const token = 'ang_admin_b19e7e72fd2e92f9e3009a5a2facb6556672fcd706c69439';
-      try {
-        const res = await fetch('/v1/admin/social-drafts', {
-          headers: { 'Authorization': `Bearer ${token}` }
-        });
-        const data = await res.json();
-        const container = document.getElementById('socialDraftsContainer');
-        container.innerHTML = '';
-
-        if (!data.items || data.items.length === 0) {
-          container.innerHTML = '<div style="color: #64748b; font-size: 12px;">No hay borradores de redes sociales aún. Confirma un producto para generarlo automáticamente.</div>';
-          return;
-        }
-
-        data.items.slice(0, 3).forEach(d => {
-          const div = document.createElement('div');
-          div.className = 'social-card';
-          div.innerHTML = `
-            <div class="social-header">
-              <span>🔵 Facebook & Instagram Draft</span>
-              <span style="font-size: 10px; color: #4ade80; margin-left: auto;">Estado: Preparado</span>
-            </div>
-            <div class="social-caption">${d.caption}</div>
-          `;
-          container.appendChild(div);
-        });
-      } catch (err) {
-        console.error('Error cargando social drafts:', err);
       }
     }
 

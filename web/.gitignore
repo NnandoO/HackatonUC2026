@@ -6,6 +6,8 @@ build/
 .env.local
 *.log
 data/
+secrets/*
+!secrets/README.md
 !.gitignore
 .impeccable/mocks/
 .impeccable/review/

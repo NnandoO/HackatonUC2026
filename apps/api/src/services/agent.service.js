@@ -396,7 +396,8 @@ export class AgentService {
 
         const draftId = crypto.randomUUID();
         const nowIso = new Date().toISOString();
-        const caption = `${args.facebookCopy || `¡Nueva prenda en Angibell! Conoce ${prod.name}`}\n\n---\nInstagram:\n${args.instagramCopy || args.facebookCopy || prod.description}`;
+        const caption = args.instagramCopy || args.facebookCopy ||
+          `Nueva prenda en Angibell Creaciones: ${prod.name}.\n\n${prod.description}\n\nConsulta tallas y disponibilidad con la tienda.`;
         db.execute(`
           INSERT INTO social_drafts (id, product_id, caption, image_urls, status, mode, created_at)
           VALUES (?, ?, ?, ?, 'prepared', 'simulated', ?)

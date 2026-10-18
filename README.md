@@ -25,6 +25,31 @@ Plataforma de comercio electrónico con automatización comercial para **Angibel
 
 SORYNTEL — Conti MIPYME Hackathon 2026.
 
+## Demo local disponible
+
+La tienda y el motor comercial pueden ejecutarse juntos desde `web/`:
+
+```sh
+bash scripts/start-demo.sh
+```
+
+La web queda en `http://localhost:3000`; el chat de demostración está en
+`/simulator` y el panel de administración en `/panel`. La API comercial solo
+queda accesible desde el propio equipo en `localhost:4000`. El puente de
+WhatsApp inicia desactivado. Para respuestas generadas por IA se debe agregar
+`OPENROUTER_API_KEY` a `web/.env`; sin esa clave, el proveedor no podrá responder.
+El script crea claves locales aleatorias; consulta `web/.env` para iniciar sesión
+en el panel y para integrar Paperclip.
+
+Al aprobar una publicación en el panel, el producto pasa también al catálogo
+del motor comercial, queda preparado un texto para Meta y aparece en el chat de
+demo. Las ventas llegan al panel para que Angibell confirme stock, fecha y
+envío; solo después se genera el enlace de pago simulado. La publicación real
+en Facebook e Instagram necesita las credenciales respectivas, los IDs de la
+Página/cuenta y una URL HTTPS pública para las imágenes; consulta
+`web/secrets/README.md`. Cada publicación exige aprobación expresa en el panel.
+Culqi real y el despliegue público todavía requieren configuración externa.
+
 ## Base de contratos v1
 
 Ver [arquitectura](docs/architecture.md), [HTTP](docs/http-api.md),
@@ -39,8 +64,8 @@ pnpm check
 pnpm typecheck
 ```
 
-`apps/web` y `apps/api` están reservados para los especialistas; esta base no
-arranca tienda, API ni infraestructura. PostgreSQL y Redis se configurarán en
-la entrega backend, sin credenciales en Git. La demo será simulada por defecto.
-La incorporación local del commit inicial está autorizada; integrar ramas de
-implementación, publicar o desplegar requiere revisión humana SORYNTEL.
+La tienda y API de demostración descritas arriba ya pueden ejecutarse juntas.
+La base técnica de producción sigue definiendo PostgreSQL y Redis como destino;
+este arranque local usa almacenamiento SQLite y servicios simulados. No guardar
+credenciales en Git. Integrar ramas, publicar o desplegar requiere revisión
+humana SORYNTEL.

@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
+import fs from 'node:fs';
 import { catalogService } from './services/catalog.service.js';
 import { orderService } from './services/order.service.js';
 import { paymentService } from './services/payment.service.js';
@@ -10,6 +11,7 @@ import { db } from './database/db.js';
 import { agentService, isWithinAngibellScope } from './services/agent.service.js';
 import { salesService } from './services/sales.service.js';
 import { verifyMetaSignature } from './server.js';
+import { socialService } from './services/social.service.js';
 
 test('WhatsApp HTTP webhook requires a valid Meta signature', () => {
     const body = JSON.stringify({ object: 'whatsapp_business_account' });
@@ -193,4 +195,104 @@ test('Sales advisor: validation is required before reserving stock or creating a
     assert.equal(db.queryOne(`SELECT stock_reserved FROM variants WHERE id = ?`, [variantId]).stock_reserved, 1);
     assert.throws(() => salesService.approveRequest(request.id, adminId,
         { deliveryDate: '2099-01-01', shippingCents: 1000 }), /CONFLICT/);
+});
+
+function createSocialDraftForTest() {
+    const id = crypto.randomUUID();
+    const productId = crypto.randomUUID();
+    const now = new Date().toISOString();
+    db.execute(`INSERT INTO products (id, name, description, image_urls, status, version, created_at, updated_at)
+      VALUES (?, 'Prenda Meta test', 'Test', '[]', 'published', 1, ?, ?)`, [productId, now, now]);
+    db.execute(`INSERT INTO social_drafts (id, product_id, caption, image_urls, status, mode, created_at)
+      VALUES (?, ?, 'Publicación de prueba', '["https://cdn.example.test/prenda.jpg"]', 'prepared', 'simulated', ?)`,
+      [id, productId, now]);
+    return id;
+}
+
+test('Meta publishers: Facebook photo publish is idempotent after success', async () => {
+    const originalFetch = globalThis.fetch;
+    const savedEnv = Object.fromEntries(['META_FACEBOOK_PAGE_TOKEN_FILE', 'META_FACEBOOK_PAGE_ID', 'META_GRAPH_API_VERSION']
+        .map((key) => [key, process.env[key]]));
+    const tokenPath = `/tmp/angibell-meta-token-${crypto.randomUUID()}`;
+    const draftId = createSocialDraftForTest();
+    try {
+        process.env.META_FACEBOOK_PAGE_TOKEN_FILE = tokenPath;
+        process.env.META_FACEBOOK_PAGE_ID = 'page-test-123';
+        process.env.META_GRAPH_API_VERSION = 'v26.0';
+        fs.writeFileSync(tokenPath, 'test-page-token', { mode: 0o600 });
+        let calls = 0;
+        globalThis.fetch = async (url, options) => {
+            calls += 1;
+            assert.match(String(url), /graph\.facebook\.com\/v26\.0\/page-test-123\/photos$/);
+            assert.equal(options.method, 'POST');
+            assert.match(String(options.body), /caption=Publicaci%C3%B3n/);
+            return { ok: true, json: async () => ({ id: 'photo-123', post_id: 'page_456' }) };
+        };
+        const first = await socialService.publishFacebookDraft(draftId);
+        const replay = await socialService.publishFacebookDraft(draftId);
+        assert.equal(first.mediaId, 'page_456');
+        assert.equal(first.status, 'published');
+        assert.equal(replay.alreadyPublished, true);
+        assert.equal(calls, 1);
+    } finally {
+        fs.rmSync(tokenPath, { force: true });
+        globalThis.fetch = originalFetch;
+        for (const [key, value] of Object.entries(savedEnv)) {
+            if (value === undefined) delete process.env[key]; else process.env[key] = value;
+        }
+    }
+});
+
+test('Meta publisher: Instagram creates and then publishes a media container', async () => {
+    const originalFetch = globalThis.fetch;
+    const savedEnv = Object.fromEntries(['META_ACCESS_TOKEN_FILE', 'META_INSTAGRAM_USER_ID', 'META_GRAPH_API_VERSION']
+        .map((key) => [key, process.env[key]]));
+    const tokenPath = `/tmp/angibell-meta-token-${crypto.randomUUID()}`;
+    const draftId = createSocialDraftForTest();
+    try {
+        process.env.META_ACCESS_TOKEN_FILE = tokenPath;
+        process.env.META_INSTAGRAM_USER_ID = 'ig-test-123';
+        process.env.META_GRAPH_API_VERSION = 'v26.0';
+        fs.writeFileSync(tokenPath, 'test-instagram-token', { mode: 0o600 });
+        const paths = [];
+        globalThis.fetch = async (url) => {
+            paths.push(String(url));
+            return { ok: true, json: async () => paths.length === 1 ? { id: 'container-123' } : { id: 'ig-media-456' } };
+        };
+        const result = await socialService.publishInstagramDraft(draftId);
+        assert.equal(result.mediaId, 'ig-media-456');
+        assert.equal(paths.length, 2);
+        assert.match(paths[0], /graph\.instagram\.com\/v26\.0\/ig-test-123\/media$/);
+        assert.match(paths[1], /graph\.instagram\.com\/v26\.0\/ig-test-123\/media_publish$/);
+    } finally {
+        fs.rmSync(tokenPath, { force: true });
+        globalThis.fetch = originalFetch;
+        for (const [key, value] of Object.entries(savedEnv)) {
+            if (value === undefined) delete process.env[key]; else process.env[key] = value;
+        }
+    }
+});
+
+test('Meta publisher: ambiguous network failure blocks duplicate publishing', async () => {
+    const originalFetch = globalThis.fetch;
+    const savedEnv = Object.fromEntries(['META_FACEBOOK_PAGE_TOKEN_FILE', 'META_FACEBOOK_PAGE_ID']
+        .map((key) => [key, process.env[key]]));
+    const tokenPath = `/tmp/angibell-meta-token-${crypto.randomUUID()}`;
+    const draftId = createSocialDraftForTest();
+    try {
+        process.env.META_FACEBOOK_PAGE_TOKEN_FILE = tokenPath;
+        process.env.META_FACEBOOK_PAGE_ID = 'page-test-789';
+        fs.writeFileSync(tokenPath, 'test-page-token', { mode: 0o600 });
+        let calls = 0;
+        globalThis.fetch = async () => { calls += 1; throw new TypeError('network unavailable'); };
+        await assert.rejects(socialService.publishFacebookDraft(draftId), /network unavailable/);
+        await assert.rejects(socialService.publishFacebookDraft(draftId), /PUBLICATION_UNCERTAIN/);
+        assert.equal(calls, 1);
+    } finally {
+        fs.rmSync(tokenPath, { force: true });
+        globalThis.fetch = originalFetch;
+        for (const [key, value] of Object.entries(savedEnv)) {
+            if (value === undefined) delete process.env[key]; else process.env[key] = value;
+        }
+    }
 });

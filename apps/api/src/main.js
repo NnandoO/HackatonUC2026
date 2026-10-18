@@ -21,11 +21,15 @@ catch (err) {
     console.error('Advertencia durante seed:', err);
 }
 
-// Start WppConnect real WhatsApp polling
-try {
-    wppConnectService.startPolling();
-} catch (err) {
-    console.error('Advertencia iniciando WppConnect polling:', err);
+// WhatsApp bridge is opt-in; the local demo API must not connect to a real account.
+if (process.env.WHATSAPP_BRIDGE_ENABLED === 'true') {
+    try {
+        wppConnectService.startPolling();
+    } catch (err) {
+        console.error('Advertencia iniciando WppConnect polling:', err);
+    }
+} else {
+    console.log('Puente de WhatsApp desactivado (WHATSAPP_BRIDGE_ENABLED != true).');
 }
 
 const server = createServer();

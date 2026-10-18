@@ -111,7 +111,7 @@ export class ProposalService {
                     affectedProduct = catalogService.getProductById(action.productId);
                     if (affectedProduct) {
                         const draftId = crypto.randomUUID();
-                        const caption = `👗 ¡Nueva prenda en Angibell! Conoce "${affectedProduct.name}".\n\n${affectedProduct.description}\n\n✨ Calidad garantizada para niñas y damas.\n📲 Escríbenos para pedidos y envíos a todo el Perú.\n\n#Angibell #ModaInfantil #HechoEnPeru #Vestidos`;
+                        const caption = `Nueva prenda en Angibell Creaciones: ${affectedProduct.name}.\n\n${affectedProduct.description}\n\nConsulta tallas y disponibilidad con la tienda. #Angibell #ModaInfantil #HechoEnPeru`;
                         db.execute(`INSERT INTO social_drafts (id, product_id, caption, image_urls, status, mode, created_at)
                                     VALUES (?, ?, ?, ?, 'prepared', 'simulated', ?)`, [draftId, affectedProduct.id, caption, JSON.stringify(affectedProduct.imageUrls || []), nowIso]);
                         socialDraft = {
@@ -158,7 +158,7 @@ export class ProposalService {
                         throw new Error(`CONFLICT: Versión desactualizada.`);
                     }
                     const draftId = crypto.randomUUID();
-                    const caption = `👗 ¡Nueva prenda en Angibell! Conoce "${prod.name}".\n\n${prod.description}\n\n✨ Calidad garantizada para niñas y damas.\n📲 Escríbenos para pedidos y envíos a todo el Perú.\n\n#Angibell #ModaInfantil #HechoEnPeru #Vestidos`;
+                    const caption = `Nueva prenda en Angibell Creaciones: ${prod.name}.\n\n${prod.description}\n\nConsulta tallas y disponibilidad con la tienda. #Angibell #ModaInfantil #HechoEnPeru`;
                     db.execute(`INSERT INTO social_drafts (id, product_id, caption, image_urls, status, mode, created_at)
              VALUES (?, ?, ?, ?, 'prepared', 'simulated', ?)`, [draftId, prod.id, caption, prod.image_urls, nowIso]);
                     socialDraft = {

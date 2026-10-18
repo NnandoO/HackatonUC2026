@@ -3,6 +3,7 @@ import { getProductById } from "@/lib/db";
 import { isPanelAuthenticated } from "@/lib/panel-auth";
 import { toPublicProduct } from "@/lib/public";
 import { approveProduct, rejectProduct } from "@/lib/flow";
+import { syncApprovedProductToCore } from "@/lib/core-catalog";
 
 export const dynamic = "force-dynamic";
 
@@ -35,9 +36,19 @@ export async function PATCH(req: Request, { params }: Params) {
   if (action === "rechazar") {
     return Response.json({ producto: toPublicProduct(rejectProduct(product.id)) });
   }
+  let motorComercial = null;
+  try {
+    motorComercial = await syncApprovedProductToCore(product);
+  } catch (error) {
+    return Response.json(
+      { error: `No se pudo sincronizar con el motor comercial: ${error instanceof Error ? error.message : "error desconocido"}` },
+      { status: 502 },
+    );
+  }
   const outcome = await approveProduct(product.id);
   return Response.json({
     producto: toPublicProduct(outcome.product),
     almacen: outcome.sync ?? { estado: "no_configurado", aviso: outcome.aviso },
+    motorComercial,
   });
 }

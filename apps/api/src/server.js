@@ -18,7 +18,7 @@ import { checkIdempotency, saveIdempotency } from './middleware/idempotency.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
-const MEDIA_DIR = path.resolve(__dirname, '../../../.state/media');
+const MEDIA_DIR = process.env.MEDIA_DIR || path.resolve(__dirname, '../../../.state/media');
 const MEDIA_TYPES = { jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png', webp: 'image/webp' };
 
 export function verifyMetaSignature(rawBody, signatureHeader, appSecret) {
@@ -132,9 +132,8 @@ export function createServer() {
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Vincular WhatsApp Real — ANGIBELL 360</title>
-  <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;600;700&display=swap" rel="stylesheet">
   <style>
-    body { font-family: 'Plus Jakarta Sans', sans-serif; background: #0c1317; color: #e9edef; display: flex; align-items: center; justify-content: center; min-height: 100vh; margin: 0; padding: 20px; box-sizing: border-box; }
+    body { font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: #0c1317; color: #e9edef; display: flex; align-items: center; justify-content: center; min-height: 100vh; margin: 0; padding: 20px; box-sizing: border-box; }
     .card { background: #111b21; border: 1px solid #2a3942; border-radius: 16px; padding: 36px; max-width: 480px; width: 100%; text-align: center; box-shadow: 0 10px 30px rgba(0,0,0,0.5); }
     h1 { font-size: 22px; margin-bottom: 8px; color: #25d366; }
     p { font-size: 13.5px; color: #8696a0; line-height: 1.5; margin-bottom: 24px; }
@@ -329,6 +328,37 @@ export function createServer() {
                 return sendJson(res, 200, result, requestId);
             }
 
+            if (method === 'PATCH' && pathname === '/v1/admin/stock') {
+                if (auth.role !== 'admin') {
+                    return sendError(res, 403, 'FORBIDDEN', 'Acceso denegado: requiere rol de administradora.', requestId);
+                }
+                const input = JSON.parse(await readBody(req) || '{}');
+                if (!Array.isArray(input.updates) || input.updates.length < 1 || input.updates.length > 200) {
+                    return sendError(res, 400, 'INVALID_INPUT', 'updates debe contener entre 1 y 200 variantes.', requestId);
+                }
+                const now = new Date().toISOString();
+                db.transaction(() => {
+                    for (const update of input.updates) {
+                        const variantId = String(update.variantId || '');
+                        const stock = Number(update.stock);
+                        if (!/^[a-zA-Z0-9_-]{1,80}$/.test(variantId) || !Number.isSafeInteger(stock) || stock < 0 || stock > 100000) {
+                            throw new Error('INVALID_INPUT: Cada ajuste necesita variantId y stock entero válido.');
+                        }
+                        const variant = db.queryOne(`SELECT id, stock_reserved FROM variants WHERE id = ?`, [variantId]);
+                        if (!variant) throw new Error(`NOT_FOUND: Variante ${variantId} no encontrada.`);
+                        if (stock < variant.stock_reserved) {
+                            throw new Error(`CONFLICT: El stock no puede quedar por debajo de las unidades reservadas (${variant.stock_reserved}).`);
+                        }
+                        db.execute(`UPDATE variants SET stock_on_hand = ?, version = version + 1 WHERE id = ?`, [stock, variantId]);
+                        db.execute(`INSERT INTO audit_events (id, actor_id, action, entity_id, request_id, changes, created_at)
+                          VALUES (?, ?, 'set_stock', ?, ?, ?, ?)`,
+                          [crypto.randomUUID(), auth.actorId, variantId, requestId,
+                            JSON.stringify({ stockOnHand: stock }), now]);
+                    }
+                });
+                return sendJson(res, 200, { ok: true, actualizadas: input.updates.length }, requestId);
+            }
+
             // 7. POST /v1/admin/proposals
             if (method === 'POST' && pathname === '/v1/admin/proposals') {
                 if (auth.role !== 'admin') {
@@ -465,6 +495,16 @@ export function createServer() {
                 return sendJson(res, 200, result, requestId);
             }
 
+            // 16.2 POST /v1/admin/social-drafts/:id/publish-facebook
+            const publishFacebookMatch = pathname.match(/^\/v1\/admin\/social-drafts\/([a-zA-Z0-9_-]+)\/publish-facebook$/);
+            if (method === 'POST' && publishFacebookMatch && publishFacebookMatch[1]) {
+                if (auth.role !== 'admin') {
+                    return sendError(res, 403, 'FORBIDDEN', 'Acceso denegado: requiere rol de administrador.', requestId);
+                }
+                const result = await socialService.publishFacebookDraft(publishFacebookMatch[1]);
+                return sendJson(res, 200, result, requestId);
+            }
+
             // 17. Webhooks
             if (method === 'GET' && pathname === '/v1/webhooks/whatsapp') {
                 const verifyToken = query['hub.verify_token'];
@@ -566,6 +606,18 @@ export function createServer() {
             }
             if (msg.startsWith('CONFLICT:')) {
                 return sendError(res, 409, 'CONFLICT', msg.replace('CONFLICT:', '').trim(), requestId);
+            }
+            if (msg.startsWith('PUBLICATION_UNCERTAIN:')) {
+                return sendError(res, 409, 'PUBLICATION_UNCERTAIN', msg.replace('PUBLICATION_UNCERTAIN:', '').trim(), requestId);
+            }
+            if (msg.startsWith('META_NOT_CONFIGURED:')) {
+                return sendError(res, 503, 'META_NOT_CONFIGURED', msg.replace('META_NOT_CONFIGURED:', '').trim(), requestId);
+            }
+            if (msg.startsWith('MEDIA_NOT_PUBLIC:')) {
+                return sendError(res, 503, 'MEDIA_NOT_PUBLIC', msg.replace('MEDIA_NOT_PUBLIC:', '').trim(), requestId);
+            }
+            if (msg.startsWith('META_API_ERROR:')) {
+                return sendError(res, 502, 'META_API_ERROR', msg.replace('META_API_ERROR:', '').trim(), requestId);
             }
             if (msg.startsWith('OUT_OF_STOCK:')) {
                 return sendError(res, 409, 'OUT_OF_STOCK', msg.replace('OUT_OF_STOCK:', '').trim(), requestId);

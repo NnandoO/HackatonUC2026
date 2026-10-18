@@ -117,6 +117,9 @@ export class SalesService {
   }
 
   async notifyAdmin(request) {
+    if (process.env.WHATSAPP_BRIDGE_ENABLED !== 'true') {
+      return { sent: false, reason: 'whatsapp_bridge_disabled' };
+    }
     const adminPhone = process.env.SALES_ADMIN_PHONE || '51995992450';
     const { wppConnectService } = await import('./wppconnect.service.js');
     const summary = request.items.map(item => `${item.name} (${item.sku}) ×${item.quantity}`).join(', ');
@@ -127,6 +130,9 @@ export class SalesService {
   }
 
   async notifyCustomer(id) {
+    if (process.env.WHATSAPP_BRIDGE_ENABLED !== 'true') {
+      return { sent: false, reason: 'whatsapp_bridge_disabled' };
+    }
     const row = db.queryOne(`SELECT s.*, a.phone FROM sales_requests s JOIN actors a ON a.id = s.actor_id WHERE s.id = ?`, [id]);
     if (!row || row.status !== 'approved' || row.notification_sent_at || !row.phone) return { sent: false };
     const { wppConnectService } = await import('./wppconnect.service.js');

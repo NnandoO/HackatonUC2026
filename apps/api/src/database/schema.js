@@ -140,6 +140,19 @@ CREATE TABLE IF NOT EXISTS social_drafts (
   created_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS social_publications (
+  id TEXT PRIMARY KEY,
+  draft_id TEXT NOT NULL REFERENCES social_drafts(id),
+  provider TEXT NOT NULL CHECK(provider IN ('facebook', 'instagram')),
+  status TEXT NOT NULL CHECK(status IN ('publishing', 'published', 'failed', 'unknown')),
+  remote_id TEXT,
+  error TEXT,
+  attempts INTEGER NOT NULL DEFAULT 1,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  UNIQUE(draft_id, provider)
+);
+
 CREATE TABLE IF NOT EXISTS conversations (
   id TEXT PRIMARY KEY,
   actor_id TEXT NOT NULL REFERENCES actors(id),

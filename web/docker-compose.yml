@@ -4,24 +4,74 @@ name: angibell360
 # La página funciona aunque el almacén tarde en levantar: degrada a "stock conocido".
 
 services:
+  # ---------- Motor comercial (SQLite, chatbot y pagos simulados) ----------
+  api:
+    build:
+      context: ..
+      dockerfile: apps/api/Dockerfile
+    container_name: angibell-api
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:4000:4000"
+    environment:
+      PORT: "4000"
+      HOST: 0.0.0.0
+      DB_PATH: /data/angibell.db
+      MEDIA_DIR: /app/.state/media
+      WHATSAPP_BRIDGE_ENABLED: ${WHATSAPP_BRIDGE_ENABLED:-false}
+      ANGIBELL_ADMIN_SERVICE_KEY: ${ANGIBELL_ADMIN_SERVICE_KEY:?Ejecuta scripts/start-demo.sh para crear la clave interna}
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
+      OPENROUTER_MODEL: ${OPENROUTER_MODEL:-openai/gpt-4o-mini}
+      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-}
+      SALES_ADMIN_PHONE: ${SALES_ADMIN_PHONE:-51995992450}
+      META_GRAPH_API_VERSION: ${META_GRAPH_API_VERSION:-v26.0}
+      META_INSTAGRAM_USER_ID: ${META_INSTAGRAM_USER_ID:-}
+      META_ACCESS_TOKEN_FILE: /run/secrets/meta-instagram-token
+      META_FACEBOOK_PAGE_ID: ${META_FACEBOOK_PAGE_ID:-}
+      META_FACEBOOK_PAGE_TOKEN_FILE: /run/secrets/meta-facebook-page-token
+    volumes:
+      - ./data/api:/data
+      - ./data/api-media:/app/.state/media
+      - ./secrets:/run/secrets:ro
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:4000/v1/health').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+    networks:
+      - angibell
+
   # ---------- Página de Angibell 360 ----------
   web:
-    build: .
+    build:
+      context: ..
+      dockerfile: web/Dockerfile
+      args:
+        ANGIBELL_API_URL: http://api:4000
     container_name: angibell-web
     restart: unless-stopped
     ports:
-      - "3000:3000"
+      - "127.0.0.1:3000:3000"
     environment:
       DATA_DIR: /data
-      PAPERCLIP_API_KEY: ${PAPERCLIP_API_KEY:-cambia-esta-clave}
-      PANEL_PASSWORD: ${PANEL_PASSWORD:-angibell360}
+      PAPERCLIP_API_KEY: ${PAPERCLIP_API_KEY:?Ejecuta scripts/start-demo.sh para crear la clave local}
+      PANEL_PASSWORD: ${PANEL_PASSWORD:?Ejecuta scripts/start-demo.sh para crear una clave de panel local}
+      ANGIBELL_ADMIN_SERVICE_KEY: ${ANGIBELL_ADMIN_SERVICE_KEY:?Ejecuta scripts/start-demo.sh para crear la clave interna}
+      ANGIBELL_API_URL: http://api:4000
+      CORE_CATALOG_SYNC_ENABLED: "true"
       ERPNEXT_URL: ${ERPNEXT_URL:-http://frontend:8080}
       ERPNEXT_API_KEY: ${ERPNEXT_API_KEY:-}
       ERPNEXT_API_SECRET: ${ERPNEXT_API_SECRET:-}
     volumes:
       - ./data:/data
+      - ./data/api-media:/data/uploads
     networks:
       - angibell
+    depends_on:
+      api:
+        condition: service_healthy
+
 
   # ---------- Almacén: Frappe/ERPNext v16 (base del compose oficial frappe_docker) ----------
   backend:
@@ -152,7 +202,7 @@ services:
       - sites:/home/frappe/frappe-bench/sites
       - logs:/home/frappe/frappe-bench/logs
     ports:
-      - "8080:8080"
+      - "127.0.0.1:8080:8080"
 
   queue-long:
     image: frappe/erpnext:v16.51.1

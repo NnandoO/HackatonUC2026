@@ -4,6 +4,7 @@ import { getErpnextConfig, getErpnextState, pingErpnext, refreshStockCache } fro
 import { syncPending } from "@/lib/flow";
 import { isPanelAuthenticated } from "@/lib/panel-auth";
 import { toPublicProduct } from "@/lib/public";
+import { syncStockToCore } from "@/lib/core-catalog";
 
 export const dynamic = "force-dynamic";
 
@@ -78,6 +79,19 @@ export async function PATCH(req: Request) {
       );
     }
     lista.push({ variantId, stock });
+  }
+  const variants = listProducts({ limit: 500 }).flatMap((product) => product.variants);
+  const coreUpdates = lista.flatMap((update) => {
+    const variant = variants.find((candidate) => candidate.id === update.variantId);
+    return variant?.coreId ? [{ variantId: variant.coreId, stock: update.stock }] : [];
+  });
+  try {
+    await syncStockToCore(coreUpdates);
+  } catch (error) {
+    return Response.json(
+      { error: `No se pudo sincronizar el stock con el motor comercial: ${error instanceof Error ? error.message : "error desconocido"}` },
+      { status: 502 },
+    );
   }
   for (const u of lista) setVariantDeclaredStock(u.variantId, u.stock);
   return Response.json({ ok: true, actualizadas: lista.length });

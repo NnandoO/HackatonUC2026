@@ -13,6 +13,20 @@ export function parseCookies(req) {
     return cookies;
 }
 export function getAuthContext(req) {
+    const configuredServiceKey = process.env.ANGIBELL_ADMIN_SERVICE_KEY || '';
+    const providedServiceKey = req.headers['x-angibell-admin-key'] || '';
+    if (configuredServiceKey && typeof providedServiceKey === 'string') {
+        const expected = Buffer.from(configuredServiceKey);
+        const provided = Buffer.from(providedServiceKey);
+        if (expected.length === provided.length && crypto.timingSafeEqual(expected, provided)) {
+            const actorId = 'web-panel-service';
+            const actor = db.queryOne(`SELECT id FROM actors WHERE id = ?`, [actorId]);
+            if (!actor) {
+                db.execute(`INSERT INTO actors (id, role, created_at) VALUES (?, 'admin', ?)`, [actorId, new Date().toISOString()]);
+            }
+            return { actorId, role: 'admin' };
+        }
+    }
     const authHeader = req.headers.authorization;
     const cookies = parseCookies(req);
     const token = authHeader?.replace(/^Bearer\s+/i, '') || cookies['angibell_session'];
