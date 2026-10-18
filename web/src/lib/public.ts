@@ -1,16 +1,16 @@
 import type { Product } from "./db";
 
 export type PublicVariant = {
-  id: number;
+  id: string;
   size: string;
   color: string;
   stock: number;
-  stockFuente: "erp" | "declarado";
+  stockFuente: "declarado";
   stockDeclarado: number;
 };
 
 export type PublicProduct = {
-  id: number;
+  id: string;
   slug: string;
   name: string;
   description: string;
@@ -32,8 +32,8 @@ export function toPublicProduct(p: Product): PublicProduct {
     id: v.id,
     size: v.size,
     color: v.color,
-    stock: v.stockCache ?? v.stockDeclared,
-    stockFuente: v.stockCache !== null ? "erp" : "declarado",
+    stock: v.stockDeclared,
+    stockFuente: "declarado",
     stockDeclarado: v.stockDeclared,
   }));
   const totalStock = variants.reduce((sum, v) => sum + v.stock, 0);

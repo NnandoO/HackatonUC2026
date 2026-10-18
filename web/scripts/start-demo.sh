@@ -17,7 +17,7 @@ ensure_secret() {
 ensure_secret ANGIBELL_ADMIN_SERVICE_KEY
 ensure_secret PAPERCLIP_API_KEY
 ensure_secret PANEL_PASSWORD
-ensure_secret ERPNEXT_DB_ROOT_PASSWORD
-ensure_secret ERPNEXT_ADMIN_PASSWORD
+ensure_secret POSTGRES_PASSWORD
+ensure_secret META_TOKEN_ENCRYPTION_KEY
 
-exec docker compose --env-file "$ENV_FILE" -f "$ROOT/docker-compose.yml" up --build api web
+exec docker compose --env-file "$ENV_FILE" -f "$ROOT/docker-compose.yml" up --build postgres api web
