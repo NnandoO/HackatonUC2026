@@ -1,8 +1,8 @@
 # Preparación de producción de ANGIBELL 360
 
-`compose.production.yml` define únicamente PostgreSQL, la API y la tienda. No
-incluye ERPNext. El contenedor `angibell-cloudflared` está instalado por separado
-en el EC2 y unido a la red Docker externa `angibell`.
+`compose.production.yml` define PostgreSQL, la API, la tienda y el puente
+WPPConnect aislado. No incluye ERPNext. `angibell-cloudflared` está instalado
+por separado en el EC2 y unido a la red Docker externa `angibell`.
 
 ## Estado y condición de arranque
 
@@ -21,6 +21,14 @@ contraseña para URL.
 Los archivos de tokens Meta se montan desde `deploy/secrets/` y no deben
 versionarse. Mantener desactivado `META_PUBLISH_ENABLED` hasta verificar la
 autorización y publicación real desde el panel.
+
+Para habilitar WPPConnect en el VPS, establece `WHATSAPP_BRIDGE_ENABLED=true`
+y genera un `WPPCONNECT_SECRET_KEY` único en `deploy/.env.production`. Los
+tokens y datos de sesión quedan en volúmenes Docker persistentes; el puerto
+21465 no se publica al host. La API usa ese secreto para hablar con WPPConnect.
+La pantalla `https://angibell.soryntel.com/qr` solicita la contraseña actual del
+panel antes de mostrar el QR; escanéalo desde Dispositivos vinculados en
+WhatsApp. El backend no inicia el bot hasta habilitar explícitamente la variable.
 
 ## Requisitos antes de publicar
 

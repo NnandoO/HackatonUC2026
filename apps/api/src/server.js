@@ -93,6 +93,30 @@ export function createServer() {
         const query = Object.fromEntries(parsedUrl.searchParams.entries());
         const method = req.method?.toUpperCase();
 
+        // QR pairing is an account-linking capability. Require the existing
+        // panel password before returning the QR or its status to the browser.
+        if ((pathname === '/qr' || pathname === '/api/qr-status') && method === 'GET') {
+            const expectedPassword = process.env.PANEL_PASSWORD || '';
+            const authorization = req.headers.authorization || '';
+            const basic = authorization.match(/^Basic\s+(.+)$/i);
+            let givenPassword = '';
+            if (basic) {
+                try {
+                    givenPassword = Buffer.from(basic[1], 'base64').toString('utf8').split(':').slice(1).join(':');
+                } catch {}
+            }
+            const expectedHash = crypto.createHash('sha256').update(expectedPassword).digest();
+            const givenHash = crypto.createHash('sha256').update(givenPassword).digest();
+            if (!expectedPassword || !givenPassword || !crypto.timingSafeEqual(expectedHash, givenHash)) {
+                res.writeHead(401, {
+                    'WWW-Authenticate': 'Basic realm="ANGIBELL WhatsApp pairing", charset="UTF-8"',
+                    'Cache-Control': 'no-store',
+                });
+                res.end('Autenticación requerida');
+                return;
+            }
+        }
+
         try {
             // Fotos cargadas por el administrador o web.
             const mediaMatch = pathname.match(/^\/media\/([a-z0-9_-]+\.(?:jpg|jpeg|png|webp|avif|gif))$/i);
@@ -116,6 +140,7 @@ export function createServer() {
             // 0.05 GET /api/qr-status -> Estado y QR de WppConnect
             if (method === 'GET' && pathname === '/api/qr-status') {
                 const qrData = await wppConnectService.getQrCode();
+                res.setHeader('Cache-Control', 'no-store');
                 return sendJson(res, 200, qrData, requestId);
             }
 
@@ -203,7 +228,7 @@ export function createServer() {
   </script>
 </body>
 </html>`;
-                res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+                res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
                 res.end(qrHtml);
                 return;
             }
