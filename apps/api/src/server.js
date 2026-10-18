@@ -21,6 +21,13 @@ const __dirname = path.dirname(__filename);
 const MEDIA_DIR = path.resolve(__dirname, '../../../.state/media');
 const MEDIA_TYPES = { jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png', webp: 'image/webp' };
 
+export function verifyMetaSignature(rawBody, signatureHeader, appSecret) {
+    if (!appSecret || typeof signatureHeader !== 'string' || !/^sha256=[a-f0-9]{64}$/i.test(signatureHeader)) return false;
+    const expected = crypto.createHmac('sha256', appSecret).update(rawBody).digest();
+    const provided = Buffer.from(signatureHeader.slice(7), 'hex');
+    return provided.length === expected.length && crypto.timingSafeEqual(provided, expected);
+}
+
 export function sendJson(res, statusCode, data, requestId) {
     const body = JSON.stringify(data);
     res.writeHead(statusCode, {
@@ -462,7 +469,7 @@ export function createServer() {
             if (method === 'GET' && pathname === '/v1/webhooks/whatsapp') {
                 const verifyToken = query['hub.verify_token'];
                 const challenge = query['hub.challenge'];
-                if (verifyToken === (process.env.WHATSAPP_VERIFY_TOKEN || 'angibell_webhook_secret')) {
+                if (process.env.WHATSAPP_VERIFY_TOKEN && verifyToken === process.env.WHATSAPP_VERIFY_TOKEN) {
                     res.writeHead(200, { 'Content-Type': 'text/plain' });
                     res.end(challenge || 'ok');
                     return;
@@ -472,7 +479,14 @@ export function createServer() {
 
             if (method === 'POST' && pathname === '/v1/webhooks/whatsapp') {
                 const bodyRaw = await readBody(req);
+                if (!verifyMetaSignature(bodyRaw, req.headers['x-hub-signature-256'], process.env.META_APP_SECRET)) {
+                    return sendError(res, 403, 'FORBIDDEN', 'Firma de Meta inválida o no configurada.', requestId);
+                }
                 const payload = JSON.parse(bodyRaw || '{}');
+
+                if (payload.object !== 'whatsapp_business_account') {
+                    return sendError(res, 400, 'INVALID_INPUT', 'Evento de WhatsApp inválido.', requestId);
+                }
 
                 let from = '+51912345678';
                 let text = '';
@@ -487,12 +501,7 @@ export function createServer() {
                         imageUrls.push(`https://meta-media-proxy.angibell.pe/${waMsg.image.id}`);
                     }
                 } 
-                // Caso B: Formato directo simulado
-                else {
-                    from = payload.from || '+51912345678';
-                    text = payload.text || payload.body || '';
-                    imageUrls = payload.imageUrls || [];
-                }
+                else return sendJson(res, 200, { received: true, status: 'ignored' }, requestId);
 
                 // Identificar rol: ¿Es el teléfono de la administradora?
                 const isAdmin = Boolean(db.queryOne(`SELECT phone FROM authorized_admins WHERE phone = ? AND active = 1`, [from]));

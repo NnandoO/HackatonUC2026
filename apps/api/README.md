@@ -13,3 +13,5 @@ Flujo de venta por WhatsApp:
 La API exige sesión de administradora para revisar o decidir solicitudes. `SALES_ADMIN_PHONE` define el número al que llegan avisos. `PUBLIC_BASE_URL` debe apuntar a un backend HTTPS vigente para que el enlace de pago de prueba sea accesible. La integración real de Culqi y las reglas definitivas de fechas y tarifas de reparto siguen pendientes.
 
 El bot permanece apagado hasta que se inicie explícitamente el proceso `apps/api/src/main.js`.
+
+El webhook HTTP de WhatsApp Cloud API solo acepta eventos con `X-Hub-Signature-256` válida. Configura `META_APP_SECRET` y `WHATSAPP_VERIFY_TOKEN` si vas a usar esa vía. El puente WPPConnect de la demo funciona por separado.

@@ -9,6 +9,17 @@ import { checkIdempotency, saveIdempotency } from './middleware/idempotency.js';
 import { db } from './database/db.js';
 import { agentService, isWithinAngibellScope } from './services/agent.service.js';
 import { salesService } from './services/sales.service.js';
+import { verifyMetaSignature } from './server.js';
+
+test('WhatsApp HTTP webhook requires a valid Meta signature', () => {
+    const body = JSON.stringify({ object: 'whatsapp_business_account' });
+    const secret = 'test-app-secret';
+    const signature = `sha256=${crypto.createHmac('sha256', secret).update(body).digest('hex')}`;
+    assert.equal(verifyMetaSignature(body, signature, secret), true);
+    assert.equal(verifyMetaSignature(`${body} `, signature, secret), false);
+    assert.equal(verifyMetaSignature(body, signature, ''), false);
+    assert.equal(verifyMetaSignature(body, 'sha256=invalid', secret), false);
+});
 
 test('Chat scope guard rejects unrelated questions and preserves commerce follow-ups', () => {
     assert.equal(isWithinAngibellScope('¿Cómo programo una API en Python?'), false);
