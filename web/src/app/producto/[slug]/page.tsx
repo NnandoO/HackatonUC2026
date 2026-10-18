@@ -15,18 +15,18 @@ type Props = { params: Promise<{ slug: string }> };
 
 export async function generateMetadata({ params }: Props): Promise<Metadata> {
   const { slug } = await params;
-  const producto = getProductBySlug(slug);
+  const producto = await getProductBySlug(slug);
   if (!producto || producto.status !== "publicado") return { title: "Pieza no encontrada" };
   return { title: producto.name, description: producto.description || undefined };
 }
 
 export default async function ProductoPage({ params }: Props) {
   const { slug } = await params;
-  const producto = getProductBySlug(slug);
+  const producto = await getProductBySlug(slug);
   if (!producto || producto.status !== "publicado") notFound();
   const pub = toPublicProduct(producto);
   const precio = formatPrecio(pub.priceCents, pub.currency);
-  const otros = listProducts({ status: "publicado", limit: 200 })
+  const otros = (await listProducts({ status: "publicado", limit: 200 }))
     .filter((p) => p.slug !== pub.slug)
     .slice(0, 3)
     .map(toPublicProduct);

@@ -7,7 +7,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 
 export type Pendiente = {
-  id: number;
+  id: string;
   name: string;
   precio: string;
   fuente: string;
@@ -17,12 +17,12 @@ export type Pendiente = {
 
 export function Aprobaciones({ pendientes }: { pendientes: Pendiente[] }) {
   const router = useRouter();
-  const [busy, setBusy] = useState<number | null>(null);
+  const [busy, setBusy] = useState<string | null>(null);
 
   async function decidir(p: Pendiente, accion: "aprobar" | "rechazar") {
     setBusy(p.id);
     try {
-      const res = await fetch(`/api/publications/${p.id}`, {
+      const res = await fetch(`/api/publications/${encodeURIComponent(p.id)}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ action: accion }),
@@ -30,17 +30,12 @@ export function Aprobaciones({ pendientes }: { pendientes: Pendiente[] }) {
       const j = (await res.json().catch(() => ({}))) as {
         error?: string;
         producto?: { name?: string };
-        almacen?: { estado?: string; aviso?: string };
       };
       if (!res.ok) throw new Error(j.error ?? "No se pudo completar");
       const nombre = j.producto?.name ?? p.name;
       if (accion === "aprobar") {
         toast.success(`${nombre} ya está publicada`, {
-          description:
-            j.almacen?.aviso ??
-            (j.almacen?.estado === "ok"
-              ? "Sincronizada con el almacén."
-              : "Quedó declarada mientras el almacén se conecta."),
+          description: "Disponible en el catálogo web y en el motor comercial.",
         });
       } else {
         toast.message(`${nombre} fue rechazada`, {
@@ -60,7 +55,7 @@ export function Aprobaciones({ pendientes }: { pendientes: Pendiente[] }) {
   if (pendientes.length === 0) {
     return (
       <p className="py-2 text-[15px] text-tinta-suave">
-        No hay publicaciones esperando. Cuando Paperclip suba una, aparecerá aquí para tu revisión.
+        No hay publicaciones esperando revisión.
       </p>
     );
   }

@@ -1,35 +1,48 @@
-import { getErpnextConfig, getErpnextState, pingErpnext } from "@/lib/erpnext";
+import { coreApiFetch } from "@/lib/core-api";
 
 export const dynamic = "force-dynamic";
 
 export async function GET() {
-  const cfg = await getErpnextConfig();
-  let almacen: {
-    estado: "ok" | "no_configurado" | "inaccesible";
-    url?: string;
-    usuario?: string;
-    company?: string;
-    warehouse?: string;
+  let api: {
+    estado: "ok" | "inaccesible";
+    servicio?: string;
+    modo?: string;
     detalle?: string;
-  } = { estado: "no_configurado" };
-  if (cfg) {
-    const state = await getErpnextState();
-    try {
-      const usuario = await pingErpnext(cfg);
-      almacen = { estado: "ok", url: cfg.url, usuario, ...state };
-    } catch (e) {
-      almacen = {
+  } = { estado: "inaccesible" };
+
+  try {
+    const res = await coreApiFetch("/v1/health");
+    const data = (await res.json().catch(() => ({}))) as {
+      status?: string;
+      service?: string;
+      mode?: string;
+    };
+    if (res.ok && data.status === "ok") {
+      api = {
+        estado: "ok",
+        servicio: data.service ?? "ANGIBELL 360 Core API",
+        modo: data.mode ?? "postgresql",
+      };
+    } else {
+      api = {
         estado: "inaccesible",
-        url: cfg.url,
-        detalle: String(e instanceof Error ? e.message : e).slice(0, 200),
-        ...state,
+        detalle: `HTTP ${res.status}`,
       };
     }
+  } catch (e) {
+    api = {
+      estado: "inaccesible",
+      detalle: String(e instanceof Error ? e.message : e).slice(0, 200),
+    };
   }
-  return Response.json({
-    ok: true,
-    servicio: "angibell360-web",
-    hora: new Date().toISOString(),
-    almacen,
-  });
+
+  return Response.json(
+    {
+      ok: api.estado === "ok",
+      servicio: "angibell360-web",
+      hora: new Date().toISOString(),
+      api,
+    },
+    { status: api.estado === "ok" ? 200 : 503 }
+  );
 }

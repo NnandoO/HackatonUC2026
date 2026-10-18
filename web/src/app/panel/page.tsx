@@ -38,7 +38,7 @@ export const metadata: Metadata = {
 };
 
 function fechaHora(iso: string): string {
-  const fecha = new Date(`${iso.replace(" ", "T")}Z`);
+  const fecha = new Date(iso.includes("T") ? iso : `${iso.replace(" ", "T")}Z`);
   if (Number.isNaN(fecha.getTime())) return iso;
   return new Intl.DateTimeFormat("es-PE", {
     day: "2-digit",
@@ -62,7 +62,11 @@ export default async function PanelPage() {
     );
   }
 
-  const todos = listProducts({ limit: 200 }).map(toPublicProduct);
+  const [productosRaw, registro] = await Promise.all([
+    listProducts({ limit: 200 }),
+    listPublications(20),
+  ]);
+  const todos = productosRaw.map(toPublicProduct);
   const pendientes: Pendiente[] = todos
     .filter((p) => p.status === "pendiente")
     .map((p) => ({
@@ -75,7 +79,6 @@ export default async function PanelPage() {
         "sin tallas",
       descripcion: p.description,
     }));
-  const registro = listPublications(20);
   const enAprobacion = todos.filter((p) => p.status === "pendiente").length;
   const publicados = todos.filter((p) => p.status === "publicado").length;
   let ventasPendientes: VentaPendiente[] = [];
@@ -206,9 +209,8 @@ export default async function PanelPage() {
                   </Badge>
                 </CardTitle>
                 <CardDescription>
-                  Publicaciones que Paperclip dejó esperando tu revisión.
-                  Aprobar publica la pieza en el catálogo; rechazar la deja
-                  fuera.
+                  Publicaciones esperando tu revisión. Aprobar publica la pieza en el catálogo;
+                  rechazar la deja fuera.
                 </CardDescription>
               </CardHeader>
               <CardContent>
@@ -297,7 +299,7 @@ export default async function PanelPage() {
                             .join(" · ")}
                         </TableCell>
                         <TableCell className="rotulo text-[10px] text-tinta-suave">
-                          {p.status === "pendiente" ? "Paperclip" : "Taller"}
+                          {p.status === "pendiente" ? "Por aprobar" : "Taller"}
                         </TableCell>
                       </TableRow>
                     ))}
@@ -317,9 +319,8 @@ export default async function PanelPage() {
                   </Badge>
                 </CardTitle>
                 <CardDescription>
-                  El stock llega desde Paperclip al publicar cada pieza; aquí lo
-                  corriges con tus dedos cuando vendes o aparece ropa nueva.
-                  Cada cambio se refleja al instante en la tienda.
+                  Aquí corriges el stock con tus dedos cuando vendes o aparece ropa nueva.
+                  Cada cambio se refleja al instante en PostgreSQL, en la tienda y en el bot.
                 </CardDescription>
               </CardHeader>
               <CardContent>
@@ -371,7 +372,7 @@ export default async function PanelPage() {
                 </ul>
                 <Separator className="my-6" />
                 <p className="max-w-[70ch] text-[14px] leading-relaxed text-tinta-suave">
-                  Paperclip sube publicaciones a{" "}
+                  Las publicaciones entran a{" "}
                   <span className="num">POST /api/publications</span> con la
                   cabecera <span className="num">X-API-Key</span>. La página
                   nunca publica sola: esta lista es la auditoría de lo recibido.

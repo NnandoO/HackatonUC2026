@@ -52,9 +52,10 @@ export async function POST(req: Request) {
   const buffer = Buffer.from(await file.arrayBuffer());
   await writeFile(target, buffer);
   const url = `/media/${name}`;
-  const productId = Number(form.get("productId"));
-  if (Number.isInteger(productId) && productId > 0) {
-    addProductImages(productId, [url]);
+  const rawProductId = form.get("productId");
+  const productId = typeof rawProductId === "string" ? rawProductId.trim() : "";
+  if (productId) {
+    await addProductImages(productId, [url]);
   }
   return Response.json({ ok: true, url, bytes: file.size }, { status: 201 });
 }

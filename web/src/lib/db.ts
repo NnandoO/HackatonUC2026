@@ -1,25 +1,22 @@
-import { DatabaseSync } from "node:sqlite";
 import { mkdirSync } from "node:fs";
 import path from "node:path";
+import { coreApiFetch } from "./core-api";
 
 export type ProductStatus = "pendiente" | "publicado" | "rechazado";
-export type ProductSource = "manual" | "paperclip";
+export type ProductSource = "manual" | "paperclip" | "whatsapp";
 
 export type Variant = {
-  id: number;
-  coreId: string | null;
-  productId: number;
+  id: string;
+  productId: string;
+  sku?: string;
   size: string;
   color: string;
   stockDeclared: number;
   stockCache: number | null;
-  erpnextItemCode: string | null;
-  erpnextReceipted: boolean;
 };
 
 export type Product = {
-  id: number;
-  coreId: string | null;
+  id: string;
   slug: string;
   name: string;
   description: string;
@@ -36,7 +33,12 @@ export type Product = {
   variants: Variant[];
 };
 
-export type VariantInput = { size: string; color?: string | null; stock: number };
+export type VariantInput = {
+  size: string;
+  color?: string | null;
+  stock: number;
+  sku?: string;
+};
 
 export type ProductInput = {
   name: string;
@@ -50,9 +52,8 @@ export type ProductInput = {
   variants: VariantInput[];
   status?: ProductStatus;
   source?: ProductSource;
+  publish?: boolean;
 };
-
-const g = globalThis as unknown as { __angibellDb?: DatabaseSync };
 
 function dataDir(): string {
   return process.env.DATA_DIR ?? path.join(process.cwd(), "data");
@@ -62,68 +63,6 @@ export function uploadsDir(): string {
   const dir = path.join(dataDir(), "uploads");
   mkdirSync(dir, { recursive: true });
   return dir;
-}
-
-export function getDb(): DatabaseSync {
-  if (g.__angibellDb) return g.__angibellDb;
-  mkdirSync(dataDir(), { recursive: true });
-  const db = new DatabaseSync(path.join(dataDir(), "angibell.db"));
-  db.exec(`
-    PRAGMA journal_mode = WAL;
-    PRAGMA foreign_keys = ON;
-    CREATE TABLE IF NOT EXISTS products (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      slug TEXT NOT NULL UNIQUE,
-      name TEXT NOT NULL,
-      description TEXT NOT NULL DEFAULT '',
-      price_cents INTEGER NOT NULL,
-      currency TEXT NOT NULL DEFAULT 'PEN',
-      category TEXT NOT NULL DEFAULT '',
-      colors TEXT NOT NULL DEFAULT '[]',
-      image_urls TEXT NOT NULL DEFAULT '[]',
-      core_id TEXT,
-      status TEXT NOT NULL DEFAULT 'pendiente',
-      source TEXT NOT NULL DEFAULT 'manual',
-      created_at TEXT NOT NULL DEFAULT (datetime('now')),
-      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
-    );
-    CREATE TABLE IF NOT EXISTS variants (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      product_id INTEGER NOT NULL REFERENCES products(id) ON DELETE CASCADE,
-      size TEXT NOT NULL,
-      color TEXT NOT NULL DEFAULT '',
-      stock_declared INTEGER NOT NULL DEFAULT 0,
-      stock_cache INTEGER,
-      erpnext_item_code TEXT,
-      erpnext_receipted INTEGER NOT NULL DEFAULT 0,
-      core_id TEXT,
-      UNIQUE (product_id, size, color)
-    );
-    CREATE TABLE IF NOT EXISTS publications (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      product_id INTEGER REFERENCES products(id) ON DELETE SET NULL,
-      payload TEXT NOT NULL,
-      note TEXT NOT NULL DEFAULT '',
-      received_at TEXT NOT NULL DEFAULT (datetime('now'))
-    );
-    CREATE TABLE IF NOT EXISTS settings (
-      key TEXT PRIMARY KEY,
-      value TEXT NOT NULL
-    );
-  `);
-  const productCols = db.prepare("PRAGMA table_info(products)").all() as Row[];
-  if (!productCols.some((c) => String(c.name) === "compare_at_cents")) {
-    db.exec("ALTER TABLE products ADD COLUMN compare_at_cents INTEGER");
-  }
-  if (!productCols.some((c) => String(c.name) === "core_id")) {
-    db.exec("ALTER TABLE products ADD COLUMN core_id TEXT");
-  }
-  const variantCols = db.prepare("PRAGMA table_info(variants)").all() as Row[];
-  if (!variantCols.some((c) => String(c.name) === "core_id")) {
-    db.exec("ALTER TABLE variants ADD COLUMN core_id TEXT");
-  }
-  g.__angibellDb = db;
-  return db;
 }
 
 export function slugify(name: string): string {
@@ -136,254 +75,418 @@ export function slugify(name: string): string {
   return base || `producto-${Date.now().toString(36)}`;
 }
 
-type Row = Record<string, unknown>;
+type ApiStatus = "draft" | "published" | "rejected";
 
-function variantFromRow(r: Row): Variant {
+function toStoreStatus(status: unknown): ProductStatus {
+  const s = String(status ?? "").toLowerCase();
+  if (s === "published" || s === "publicado") return "publicado";
+  if (s === "rejected" || s === "rechazado") return "rechazado";
+  return "pendiente";
+}
+
+function toApiStatus(status: ProductStatus): ApiStatus {
+  if (status === "publicado") return "published";
+  if (status === "rechazado") return "rejected";
+  return "draft";
+}
+
+function toStoreSource(source: unknown): ProductSource {
+  const s = String(source ?? "").toLowerCase();
+  if (s === "paperclip" || s === "whatsapp") return s;
+  return "manual";
+}
+
+type RawVariant = Record<string, unknown> & {
+  price?: { amountCents?: number; currency?: string };
+};
+
+type RawProduct = Record<string, unknown> & {
+  variants?: RawVariant[];
+};
+
+function mapVariantFromApi(v: RawVariant, productId: string): Variant {
+  const stock =
+    typeof v.available === "number"
+      ? v.available
+      : typeof v.stockOnHand === "number"
+        ? v.stockOnHand
+        : typeof v.stock_on_hand === "number"
+          ? v.stock_on_hand
+          : typeof v.stockDeclared === "number"
+            ? v.stockDeclared
+            : typeof v.stock === "number"
+              ? v.stock
+              : 0;
   return {
-    id: Number(r.id),
-    coreId: r.core_id == null ? null : String(r.core_id),
-    productId: Number(r.product_id),
-    size: String(r.size),
-    color: String(r.color ?? ""),
-    stockDeclared: Number(r.stock_declared),
-    stockCache: r.stock_cache === null ? null : Number(r.stock_cache),
-    erpnextItemCode: r.erpnext_item_code === null ? null : String(r.erpnext_item_code),
-    erpnextReceipted: Number(r.erpnext_receipted) === 1,
+    id: String(v.id ?? ""),
+    productId,
+    sku: v.sku ? String(v.sku) : undefined,
+    size: String(v.size ?? "Única"),
+    color: String(v.color ?? ""),
+    stockDeclared: Math.max(0, Number(stock) || 0),
+    stockCache: null,
   };
 }
 
-function productFromRow(r: Row, variants: Variant[]): Product {
+function mapProductFromApi(raw: RawProduct): Product {
+  const id = String(raw.id ?? "");
+  const name = String(raw.name ?? "");
+  const rawVariants = Array.isArray(raw.variants) ? raw.variants : [];
+  const variants = rawVariants.map((v) => mapVariantFromApi(v, id));
+  const variantPrices = rawVariants
+    .map((v) =>
+      typeof v.price?.amountCents === "number"
+        ? v.price.amountCents
+        : typeof v.price_cents === "number"
+          ? v.price_cents
+          : null
+    )
+    .filter((p): p is number => p !== null && p > 0);
+  const basePrice =
+    typeof raw.priceCents === "number" && raw.priceCents > 0
+      ? raw.priceCents
+      : typeof raw.price_cents === "number" && raw.price_cents > 0
+        ? raw.price_cents
+        : variantPrices.length > 0
+          ? Math.min(...variantPrices)
+          : 0;
+  const compareAt =
+    typeof raw.compareAtCents === "number"
+      ? raw.compareAtCents
+      : typeof raw.compare_at_cents === "number"
+        ? raw.compare_at_cents
+        : null;
+  const colors = Array.isArray(raw.colors) ? raw.colors.map(String) : [];
+  const imageUrls = Array.isArray(raw.imageUrls)
+    ? raw.imageUrls.map(String)
+    : Array.isArray(raw.image_urls)
+      ? raw.image_urls.map(String)
+      : [];
+  const createdAt = String(raw.createdAt ?? raw.created_at ?? new Date().toISOString());
+  const updatedAt = String(raw.updatedAt ?? raw.updated_at ?? createdAt);
+
   return {
-    id: Number(r.id),
-    coreId: r.core_id == null ? null : String(r.core_id),
-    slug: String(r.slug),
-    name: String(r.name),
-    description: String(r.description ?? ""),
-    priceCents: Number(r.price_cents),
-    compareAtCents:
-      r.compare_at_cents === null || r.compare_at_cents === undefined
-        ? null
-        : Number(r.compare_at_cents),
-    currency: String(r.currency ?? "PEN"),
-    category: String(r.category ?? ""),
-    colors: JSON.parse(String(r.colors ?? "[]")) as string[],
-    imageUrls: JSON.parse(String(r.image_urls ?? "[]")) as string[],
-    status: String(r.status) as ProductStatus,
-    source: String(r.source) as ProductSource,
-    createdAt: String(r.created_at),
-    updatedAt: String(r.updated_at),
+    id,
+    slug: String(raw.slug || slugify(name)),
+    name,
+    description: String(raw.description ?? ""),
+    priceCents: basePrice,
+    compareAtCents: compareAt,
+    currency: String(raw.currency ?? rawVariants[0]?.price?.currency ?? "PEN"),
+    category: String(raw.category ?? ""),
+    colors,
+    imageUrls,
+    status: toStoreStatus(raw.status),
+    source: toStoreSource(raw.source),
+    createdAt,
+    updatedAt,
     variants,
   };
 }
 
-export function createProduct(input: ProductInput): Product {
-  const db = getDb();
-  if (!input.name || !input.name.trim()) throw new Error("El nombre es obligatorio");
-  const price = Math.round(input.priceCents);
-  if (!Number.isInteger(price) || price <= 0) throw new Error("priceCents debe ser un entero positivo (céntimos)");
-  const variants: VariantInput[] = input.variants?.length ? input.variants : [{ size: "Única", stock: 0 }];
-  for (const v of variants) {
-    if (!Number.isInteger(v.stock) || v.stock < 0) throw new Error(`Stock inválido para la talla "${v.size}"`);
-  }
-  let slug = slugify(input.name);
-  if (db.prepare("SELECT id FROM products WHERE slug = ?").get(slug)) {
-    slug = `${slug}-${Date.now().toString(36).slice(-4)}`;
-  }
-  const compareAt =
-    typeof input.compareAtCents === "number" && Number.isInteger(input.compareAtCents) && input.compareAtCents > price
-      ? input.compareAtCents
-      : null;
-  const ins = db
-    .prepare(
-      `INSERT INTO products (slug, name, description, price_cents, compare_at_cents, currency, category, colors, image_urls, status, source)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-    )
-    .run(
-      slug,
-      input.name.trim(),
-      input.description?.trim() ?? "",
-      price,
-      compareAt,
-      (input.currency ?? "PEN").toUpperCase(),
-      input.category ?? "",
-      JSON.stringify(input.colors ?? []),
-      JSON.stringify(input.imageUrls ?? []),
-      input.status ?? "pendiente",
-      input.source ?? "manual"
-    );
-  const productId = Number(ins.lastInsertRowid);
-  const vIns = db.prepare(
-    "INSERT INTO variants (product_id, size, color, stock_declared) VALUES (?, ?, ?, ?)"
-  );
-  for (const v of variants) {
-    vIns.run(productId, String(v.size ?? "").trim() || "Única", String(v.color ?? "").trim(), Math.round(v.stock));
-  }
-  const created = getProductById(productId);
-  if (!created) throw new Error("No se pudo crear el producto");
-  return created;
+async function extractErrorMessage(res: Response, fallback: string): Promise<string> {
+  const payload = (await res.json().catch(() => ({}))) as {
+    error?: string | { message?: string };
+    message?: string;
+  };
+  if (typeof payload.error === "string") return payload.error;
+  if (typeof payload.error?.message === "string") return payload.error.message;
+  if (typeof payload.message === "string") return payload.message;
+  return `${fallback} (HTTP ${res.status})`;
 }
 
-export function getProductById(id: number): Product | null {
-  const db = getDb();
-  const row = db.prepare("SELECT * FROM products WHERE id = ?").get(id) as Row | undefined;
-  if (!row) return null;
-  const vs = db.prepare("SELECT * FROM variants WHERE product_id = ? ORDER BY id").all(id) as Row[];
-  return productFromRow(row, vs.map(variantFromRow));
+function unwrapProduct(payload: unknown): RawProduct | null {
+  if (!payload || typeof payload !== "object") return null;
+  const obj = payload as Record<string, unknown>;
+  if (obj.item && typeof obj.item === "object") return obj.item as RawProduct;
+  if (obj.product && typeof obj.product === "object") return obj.product as RawProduct;
+  if (typeof obj.id === "string" || typeof obj.name === "string") return obj as RawProduct;
+  return null;
 }
 
-export function getProductBySlug(slug: string): Product | null {
-  const db = getDb();
-  const row = db.prepare("SELECT * FROM products WHERE slug = ?").get(slug) as Row | undefined;
-  if (!row) return null;
-  const vs = db.prepare("SELECT * FROM variants WHERE product_id = ? ORDER BY id").all(Number(row.id)) as Row[];
-  return productFromRow(row, vs.map(variantFromRow));
+function unwrapProductList(payload: unknown): RawProduct[] {
+  if (Array.isArray(payload)) return payload as RawProduct[];
+  if (!payload || typeof payload !== "object") return [];
+  const obj = payload as Record<string, unknown>;
+  if (Array.isArray(obj.items)) return obj.items as RawProduct[];
+  if (Array.isArray(obj.products)) return obj.products as RawProduct[];
+  return [];
 }
 
-export function listProducts(opts: { status?: ProductStatus; limit?: number } = {}): Product[] {
-  const db = getDb();
+export async function listProducts(
+  opts: { status?: ProductStatus; limit?: number } = {}
+): Promise<Product[]> {
   const limit = Math.min(Math.max(opts.limit ?? 200, 1), 500);
-  const rows = (
-    opts.status
-      ? db.prepare("SELECT * FROM products WHERE status = ? ORDER BY updated_at DESC LIMIT ?").all(opts.status, limit)
-      : db.prepare("SELECT * FROM products ORDER BY updated_at DESC LIMIT ?").all(limit)
-  ) as Row[];
-  if (!rows.length) return [];
-  const ids = rows.map((r) => Number(r.id));
-  const placeholders = ids.map(() => "?").join(",");
-  const vRows = db
-    .prepare(`SELECT * FROM variants WHERE product_id IN (${placeholders}) ORDER BY id`)
-    .all(...ids) as Row[];
-  const byProduct = new Map<number, Variant[]>();
-  for (const vr of vRows) {
-    const pid = Number(vr.product_id);
-    const list = byProduct.get(pid) ?? [];
-    list.push(variantFromRow(vr));
-    byProduct.set(pid, list);
-  }
-  return rows.map((r) => productFromRow(r, byProduct.get(Number(r.id)) ?? []));
-}
-
-export function setProductStatus(id: number, status: ProductStatus): void {
-  const db = getDb();
-  db.prepare("UPDATE products SET status = ?, updated_at = datetime('now') WHERE id = ?").run(status, id);
-}
-
-export function setCoreProductMapping(
-  productId: number,
-  coreProductId: string,
-  variants: Array<{ id: number; coreId: string }>,
-): void {
-  const db = getDb();
-  db.exec("BEGIN IMMEDIATE");
   try {
-    db.prepare("UPDATE products SET core_id = ? WHERE id = ?").run(coreProductId, productId);
-    const update = db.prepare("UPDATE variants SET core_id = ? WHERE id = ? AND product_id = ?");
-    for (const variant of variants) update.run(variant.coreId, variant.id, productId);
-    db.exec("COMMIT");
-  } catch (error) {
-    db.exec("ROLLBACK");
-    throw error;
+    if (opts.status === "publicado") {
+      const res = await coreApiFetch(`/v1/products?limit=${limit}`);
+      if (!res.ok) return [];
+      const data = await res.json().catch(() => ({}));
+      return unwrapProductList(data)
+        .map(mapProductFromApi)
+        .filter((p) => p.status === "publicado");
+    }
+
+    const query = new URLSearchParams({ limit: String(limit) });
+    if (opts.status) {
+      query.set("status", toApiStatus(opts.status));
+    }
+    const res = await coreApiFetch(`/v1/admin/products?${query.toString()}`, {
+      admin: true,
+    });
+    if (!res.ok) return [];
+    const data = await res.json().catch(() => ({}));
+    const items = unwrapProductList(data).map(mapProductFromApi);
+    return opts.status ? items.filter((p) => p.status === opts.status) : items;
+  } catch {
+    return [];
   }
 }
 
-export function setVariantDeclaredStock(variantId: number, stock: number): void {
-  const db = getDb();
-  db.prepare(
-    "UPDATE variants SET stock_declared = ?, erpnext_receipted = 0 WHERE id = ?"
-  ).run(Math.max(0, Math.round(stock)), variantId);
-  db.prepare("UPDATE products SET updated_at = datetime('now') WHERE id = (SELECT product_id FROM variants WHERE id = ?)").run(variantId);
-}
-
-export function markVariantReceipted(variantId: number, itemCode: string): void {
-  const db = getDb();
-  db.prepare("UPDATE variants SET erpnext_item_code = ?, erpnext_receipted = 1 WHERE id = ?").run(itemCode, variantId);
-}
-
-export function setVariantStockCache(variantId: number, qty: number | null): void {
-  const db = getDb();
-  db.prepare("UPDATE variants SET stock_cache = ? WHERE id = ?").run(qty, variantId);
-}
-
-export function listVariantsToSync(): Variant[] {
-  const db = getDb();
-  const rows = db
-    .prepare(
-      `SELECT v.* FROM variants v JOIN products p ON p.id = v.product_id
-       WHERE p.status = 'publicado' AND v.erpnext_receipted = 0 ORDER BY v.id`
-    )
-    .all() as Row[];
-  return rows.map(variantFromRow);
-}
-
-export function listErpnextVariants(): Variant[] {
-  const db = getDb();
-  const rows = db
-    .prepare(
-      `SELECT v.* FROM variants v JOIN products p ON p.id = v.product_id
-       WHERE p.status = 'publicado' AND v.erpnext_item_code IS NOT NULL ORDER BY v.id`
-    )
-    .all() as Row[];
-  return rows.map(variantFromRow);
-}
-
-export function recordPublication(productId: number | null, payload: unknown, note: string): void {
-  const db = getDb();
-  db.prepare("INSERT INTO publications (product_id, payload, note) VALUES (?, ?, ?)").run(
-    productId,
-    JSON.stringify(payload),
-    note
-  );
-}
-
-export function listPublications(limit = 50): Array<{
-  id: number;
-  productId: number | null;
-  productName: string | null;
-  note: string;
-  receivedAt: string;
-}> {
-  const db = getDb();
-  const rows = db
-    .prepare(
-      `SELECT pub.id, pub.product_id, pub.note, pub.received_at, p.name AS product_name
-       FROM publications pub LEFT JOIN products p ON p.id = pub.product_id
-       ORDER BY pub.id DESC LIMIT ?`
-    )
-    .all(Math.min(Math.max(limit, 1), 200)) as Row[];
-  return rows.map((r) => ({
-    id: Number(r.id),
-    productId: r.product_id === null ? null : Number(r.product_id),
-    productName: r.product_name === null ? null : String(r.product_name),
-    note: String(r.note ?? ""),
-    receivedAt: String(r.received_at),
-  }));
-}
-
-export function getSetting<T>(key: string): T | null {
-  const db = getDb();
-  const row = db.prepare("SELECT value FROM settings WHERE key = ?").get(key) as Row | undefined;
-  if (!row) return null;
+export async function getProductById(id: string): Promise<Product | null> {
+  if (!id) return null;
   try {
-    return JSON.parse(String(row.value)) as T;
+    const adminRes = await coreApiFetch(`/v1/admin/products/${encodeURIComponent(id)}`, {
+      admin: true,
+    });
+    if (adminRes.ok) {
+      const raw = unwrapProduct(await adminRes.json().catch(() => null));
+      if (raw) return mapProductFromApi(raw);
+    }
+  } catch {
+    // Fallback to list/public endpoint below
+  }
+  try {
+    const adminList = await listProducts({ limit: 500 });
+    const foundAdmin = adminList.find((p) => p.id === id || p.slug === id);
+    if (foundAdmin) return foundAdmin;
+  } catch {
+    // Fallback to public endpoint below
+  }
+  try {
+    const res = await coreApiFetch(`/v1/products/${encodeURIComponent(id)}`);
+    if (!res.ok) return null;
+    const raw = unwrapProduct(await res.json().catch(() => null));
+    return raw ? mapProductFromApi(raw) : null;
   } catch {
     return null;
   }
 }
 
-export function setSetting(key: string, value: unknown): void {
-  const db = getDb();
-  db.prepare(
-    "INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value"
-  ).run(key, JSON.stringify(value));
+export async function getProductBySlug(slug: string): Promise<Product | null> {
+  if (!slug) return null;
+  try {
+    const res = await coreApiFetch(`/v1/products/${encodeURIComponent(slug)}`);
+    if (res.ok) {
+      const raw = unwrapProduct(await res.json().catch(() => null));
+      if (raw) return mapProductFromApi(raw);
+    }
+  } catch {
+    // Fallback to list lookup below
+  }
+  const published = await listProducts({ status: "publicado", limit: 500 });
+  const matchPublished = published.find((p) => p.slug === slug || p.id === slug);
+  if (matchPublished) return matchPublished;
+
+  const all = await listProducts({ limit: 500 });
+  return all.find((p) => p.slug === slug || p.id === slug) ?? null;
 }
 
-export function addProductImages(productId: number, urls: string[]): void {
-  const product = getProductById(productId);
-  if (!product) return;
-  const merged = Array.from(new Set([...product.imageUrls, ...urls.filter(Boolean)]));
-  const db = getDb();
-  db.prepare("UPDATE products SET image_urls = ?, updated_at = datetime('now') WHERE id = ?").run(
-    JSON.stringify(merged),
-    productId
+export async function createProduct(
+  input: ProductInput & { publish?: boolean }
+): Promise<Product> {
+  if (!input.name || !input.name.trim()) {
+    throw new Error("El nombre es obligatorio");
+  }
+  const price = Math.round(input.priceCents);
+  if (!Number.isInteger(price) || price <= 0) {
+    throw new Error("priceCents debe ser un entero positivo (céntimos)");
+  }
+  const variants: VariantInput[] = input.variants?.length
+    ? input.variants
+    : [{ size: "Única", stock: 0 }];
+  for (const v of variants) {
+    if (!Number.isInteger(v.stock) || v.stock < 0) {
+      throw new Error(`Stock inválido para la talla "${v.size}"`);
+    }
+  }
+  const compareAt =
+    typeof input.compareAtCents === "number" &&
+    Number.isInteger(input.compareAtCents) &&
+    input.compareAtCents > price
+      ? input.compareAtCents
+      : null;
+  const currency = (input.currency ?? "PEN").toUpperCase();
+  const publish = input.status === "publicado" || input.publish === true;
+  const baseSku =
+    slugify(input.name)
+      .toUpperCase()
+      .replace(/[^A-Z0-9]+/g, "")
+      .slice(0, 10) || "PROD";
+  const suffix = Date.now().toString(36).slice(-4).toUpperCase();
+
+  const res = await coreApiFetch("/v1/admin/products", {
+    method: "POST",
+    admin: true,
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      name: input.name.trim(),
+      description: input.description?.trim() ?? "",
+      priceCents: price,
+      compareAtCents: compareAt,
+      currency,
+      category: input.category ?? "",
+      colors: input.colors ?? [],
+      imageUrls: input.imageUrls ?? [],
+      source: input.source ?? "manual",
+      status: publish
+        ? "published"
+        : input.status === "rechazado"
+          ? "rejected"
+          : "draft",
+      publish,
+      variants: variants.map((v, index) => {
+        const size = String(v.size ?? "").trim() || "Única";
+        const cleanSize = size.toUpperCase().replace(/[^A-Z0-9]+/g, "") || "U";
+        return {
+          sku: v.sku?.trim() || `ANG-${baseSku}-T${cleanSize}-${index + 1}-${suffix}`,
+          size,
+          color: String(v.color ?? "").trim() || "Estándar",
+          price: { amountCents: price, currency },
+          stock: Math.round(v.stock),
+        };
+      }),
+    }),
+  });
+
+  if (!res.ok) {
+    throw new Error(await extractErrorMessage(res, "No se pudo crear el producto"));
+  }
+  const raw = unwrapProduct(await res.json().catch(() => null));
+  if (!raw) {
+    throw new Error("Respuesta inválida al crear el producto");
+  }
+  return mapProductFromApi(raw);
+}
+
+export async function setProductStatus(
+  id: string,
+  status: ProductStatus
+): Promise<Product> {
+  const res = await coreApiFetch(
+    `/v1/admin/products/${encodeURIComponent(id)}/status`,
+    {
+      method: "PATCH",
+      admin: true,
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ status: toApiStatus(status) }),
+    }
   );
+  if (!res.ok) {
+    throw new Error(
+      await extractErrorMessage(res, "No se pudo actualizar el estado del producto")
+    );
+  }
+  const raw = unwrapProduct(await res.json().catch(() => null));
+  if (raw) return mapProductFromApi(raw);
+  const updated = await getProductById(id);
+  if (!updated) throw new Error("Producto no encontrado tras actualizar estado");
+  return updated;
+}
+
+export async function setVariantDeclaredStock(
+  variantId: string,
+  stock: number
+): Promise<void> {
+  const res = await coreApiFetch("/v1/admin/stock", {
+    method: "PATCH",
+    admin: true,
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      updates: [{ variantId, stock: Math.max(0, Math.round(stock)) }],
+    }),
+  });
+  if (!res.ok) {
+    throw new Error(
+      await extractErrorMessage(res, "No se pudo actualizar el stock")
+    );
+  }
+}
+
+export async function recordPublication(
+  productId: string | null,
+  payload: unknown,
+  note: string
+): Promise<void> {
+  try {
+    await coreApiFetch("/v1/admin/publications", {
+      method: "POST",
+      admin: true,
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ productId, payload, note }),
+    });
+  } catch {
+    // Si la API ya registró la publicación al crear el producto, no interrumpir el flujo
+  }
+}
+
+export async function listPublications(limit = 50): Promise<
+  Array<{
+    id: number | string;
+    productId: string | null;
+    productName?: string | null;
+    note: string;
+    receivedAt: string;
+  }>
+> {
+  const clamped = Math.min(Math.max(limit, 1), 200);
+  try {
+    const res = await coreApiFetch(`/v1/admin/publications?limit=${clamped}`, {
+      admin: true,
+    });
+    if (!res.ok) return [];
+    const data = (await res.json().catch(() => ({}))) as {
+      items?: Array<Record<string, unknown>>;
+      publications?: Array<Record<string, unknown>>;
+    };
+    const rows = Array.isArray(data)
+      ? (data as Array<Record<string, unknown>>)
+      : (data.items ?? data.publications ?? []);
+    return rows.map((r, idx) => ({
+      id: (r.id as number | string) ?? idx + 1,
+      productId:
+        r.productId == null && r.product_id == null
+          ? null
+          : String(r.productId ?? r.product_id),
+      productName:
+        r.productName == null && r.product_name == null
+          ? null
+          : String(r.productName ?? r.product_name),
+      note: String(r.note ?? ""),
+      receivedAt: String(r.receivedAt ?? r.received_at ?? new Date().toISOString()),
+    }));
+  } catch {
+    return [];
+  }
+}
+
+export async function addProductImages(
+  productId: string,
+  urls: string[]
+): Promise<void> {
+  if (!productId || urls.length === 0) return;
+  try {
+    const product = await getProductById(productId);
+    const merged = Array.from(
+      new Set([...(product?.imageUrls ?? []), ...urls.filter(Boolean)])
+    );
+    await coreApiFetch(`/v1/admin/products/${encodeURIComponent(productId)}`, {
+      method: "PATCH",
+      admin: true,
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ imageUrls: merged }),
+    });
+  } catch {
+    // Ignorar si el endpoint opcional de adjuntar imagen no está disponible
+  }
 }
