@@ -357,17 +357,23 @@ export function createServer() {
                 return sendJson(res, 200, result, requestId);
             }
 
-            // 6.1 GET /v1/admin/products/:id
+            // 6.1 GET /v1/admin/products/:id & PATCH /v1/admin/products/:id
             const adminProdMatch = pathname.match(/^\/v1\/admin\/products\/([a-zA-Z0-9_-]+)$/);
-            if (method === 'GET' && adminProdMatch && adminProdMatch[1]) {
+            if ((method === 'GET' || method === 'PATCH') && adminProdMatch && adminProdMatch[1]) {
                 if (auth.role !== 'admin') {
                     return sendError(res, 403, 'FORBIDDEN', 'Acceso denegado: requiere rol de administrador.', requestId);
                 }
-                const prod = await catalogService.getProductById(adminProdMatch[1]);
-                if (!prod) {
-                    return sendError(res, 404, 'NOT_FOUND', 'Producto no encontrado.', requestId);
+                if (method === 'GET') {
+                    const prod = await catalogService.getProductById(adminProdMatch[1]);
+                    if (!prod) {
+                        return sendError(res, 404, 'NOT_FOUND', 'Producto no encontrado.', requestId);
+                    }
+                    return sendJson(res, 200, prod, requestId);
                 }
-                return sendJson(res, 200, prod, requestId);
+                const bodyRaw = await readBody(req);
+                const input = JSON.parse(bodyRaw || '{}');
+                const updated = await catalogService.updateProduct(adminProdMatch[1], input, auth.actorId);
+                return sendJson(res, 200, updated, requestId);
             }
 
             // 6.2 PATCH /v1/admin/products/:id/status

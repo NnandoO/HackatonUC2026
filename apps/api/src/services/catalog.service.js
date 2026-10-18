@@ -205,7 +205,7 @@ export class CatalogService {
                 await this._ensureSocialDraft(productId, input.name.trim(), input.description?.trim() || '', input.imageUrls || [], now);
             }
 
-            if (input.note || input.source === 'paperclip' || input.recordPublication) {
+            if (input.note || input.recordPublication) {
                 await db.execute(
                     `INSERT INTO publications (product_id, payload, note, received_at) VALUES ($1, $2, $3, $4)`,
                     [productId, JSON.stringify(input), String(input.note || `Creación (${source})`), now]
@@ -271,6 +271,55 @@ export class CatalogService {
         };
     }
 
+    async updateProduct(id, input = {}, actorId = 'web-panel-service') {
+        return db.transaction(async () => {
+            const prod = await db.queryOne(`SELECT * FROM products WHERE id = $1 OR slug = $1 FOR UPDATE`, [id]);
+            if (!prod) {
+                throw new Error('NOT_FOUND: Producto no encontrado.');
+            }
+            const nowIso = new Date().toISOString();
+            const nextName = input.name !== undefined ? String(input.name).trim() : prod.name;
+            if (!nextName || nextName.length > 120) {
+                throw new Error('INVALID_INPUT: El nombre debe tener entre 1 y 120 caracteres.');
+            }
+            const nextDescription = input.description !== undefined ? String(input.description).trim() : prod.description;
+            const nextCategory = input.category !== undefined ? String(input.category).trim() : (prod.category || '');
+            const nextColors = Array.isArray(input.colors)
+                ? JSON.stringify(input.colors.map((c) => String(c).trim()).filter(Boolean))
+                : (prod.colors || '[]');
+            const nextImages = Array.isArray(input.imageUrls)
+                ? JSON.stringify(input.imageUrls.map((u) => String(u).trim()).filter(Boolean))
+                : (prod.image_urls || '[]');
+
+            await db.execute(
+                `UPDATE products
+                 SET name = $1, description = $2, category = $3, colors = $4, image_urls = $5,
+                     version = version + 1, updated_at = $6
+                 WHERE id = $7`,
+                [nextName, nextDescription, nextCategory, nextColors, nextImages, nowIso, prod.id]
+            );
+
+            if (Array.isArray(input.imageUrls)) {
+                await db.execute(
+                    `UPDATE social_drafts SET image_urls = $1 WHERE product_id = $2`,
+                    [nextImages, prod.id]
+                );
+            }
+
+            await db.execute(
+                `INSERT INTO actors (id, role, created_at) VALUES ($1, 'admin', $2) ON CONFLICT (id) DO NOTHING`,
+                [actorId, nowIso]
+            );
+            await db.execute(
+                `INSERT INTO audit_events (id, actor_id, action, entity_id, proposal_id, request_id, changes, created_at)
+                 VALUES ($1, $2, 'update_product', $3, NULL, $4, $5, $6)`,
+                [crypto.randomUUID(), actorId, prod.id, crypto.randomUUID(), JSON.stringify(input), nowIso]
+            );
+
+            return this.getProductById(prod.id);
+        });
+    }
+
     async setProductStatus(id, status, actorId = 'web-panel-service') {
         if (!['draft', 'published', 'rejected'].includes(status)) {
             throw new Error('INVALID_INPUT: Estado de producto inválido.');
@@ -318,9 +367,10 @@ export class CatalogService {
     async listPublications(limit = 50) {
         const safeLimit = Math.min(Math.max(Number(limit) || 50, 1), 200);
         const rows = await db.query(
-            `SELECT id, product_id, payload, note, received_at
-             FROM publications
-             ORDER BY id DESC
+            `SELECT pub.id, pub.product_id, p.name AS product_name, pub.payload, pub.note, pub.received_at
+             FROM publications pub
+             LEFT JOIN products p ON p.id = pub.product_id
+             ORDER BY pub.id DESC
              LIMIT $1`,
             [safeLimit]
         );
