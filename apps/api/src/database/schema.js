@@ -1,35 +1,65 @@
 export const INIT_SCHEMA_SQL = `
 CREATE TABLE IF NOT EXISTS products (
   id TEXT PRIMARY KEY,
+  slug TEXT NOT NULL UNIQUE,
   name TEXT NOT NULL,
   description TEXT NOT NULL DEFAULT '',
+  price_cents INTEGER NOT NULL DEFAULT 0 CHECK (price_cents >= 0),
+  compare_at_cents INTEGER CHECK (compare_at_cents IS NULL OR compare_at_cents >= 0),
+  currency TEXT NOT NULL DEFAULT 'PEN',
+  category TEXT NOT NULL DEFAULT '',
+  colors TEXT NOT NULL DEFAULT '[]',
   image_urls TEXT NOT NULL DEFAULT '[]',
-  status TEXT NOT NULL CHECK(status IN ('draft', 'published')),
+  status TEXT NOT NULL DEFAULT 'draft' CHECK (status IN ('draft', 'published', 'rejected')),
+  source TEXT NOT NULL DEFAULT 'manual' CHECK (source IN ('manual', 'paperclip', 'whatsapp')),
   version INTEGER NOT NULL DEFAULT 1,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
+
+ALTER TABLE products ADD COLUMN IF NOT EXISTS slug TEXT;
+ALTER TABLE products ADD COLUMN IF NOT EXISTS price_cents INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE products ADD COLUMN IF NOT EXISTS compare_at_cents INTEGER;
+ALTER TABLE products ADD COLUMN IF NOT EXISTS currency TEXT NOT NULL DEFAULT 'PEN';
+ALTER TABLE products ADD COLUMN IF NOT EXISTS category TEXT NOT NULL DEFAULT '';
+ALTER TABLE products ADD COLUMN IF NOT EXISTS colors TEXT NOT NULL DEFAULT '[]';
+ALTER TABLE products ADD COLUMN IF NOT EXISTS source TEXT NOT NULL DEFAULT 'manual';
+
+CREATE INDEX IF NOT EXISTS idx_products_status_updated ON products (status, updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_products_created ON products (created_at DESC);
 
 CREATE TABLE IF NOT EXISTS variants (
   id TEXT PRIMARY KEY,
   product_id TEXT NOT NULL REFERENCES products(id) ON DELETE CASCADE,
   sku TEXT NOT NULL UNIQUE,
   size TEXT NOT NULL,
-  color TEXT NOT NULL,
-  price_cents INTEGER NOT NULL CHECK(price_cents >= 0),
-  stock_on_hand INTEGER NOT NULL CHECK(stock_on_hand >= 0),
-  stock_reserved INTEGER NOT NULL DEFAULT 0 CHECK(stock_reserved >= 0),
+  color TEXT NOT NULL DEFAULT '',
+  price_cents INTEGER NOT NULL CHECK (price_cents >= 0),
+  stock_on_hand INTEGER NOT NULL DEFAULT 0 CHECK (stock_on_hand >= 0),
+  stock_reserved INTEGER NOT NULL DEFAULT 0 CHECK (stock_reserved >= 0),
   version INTEGER NOT NULL DEFAULT 1,
   CHECK (0 <= stock_reserved AND stock_reserved <= stock_on_hand),
   UNIQUE (product_id, size, color)
 );
 
+CREATE INDEX IF NOT EXISTS idx_variants_product ON variants (product_id);
+
+CREATE TABLE IF NOT EXISTS publications (
+  id SERIAL PRIMARY KEY,
+  product_id TEXT REFERENCES products(id) ON DELETE SET NULL,
+  payload TEXT NOT NULL,
+  note TEXT NOT NULL DEFAULT '',
+  received_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS actors (
   id TEXT PRIMARY KEY,
-  role TEXT NOT NULL CHECK(role IN ('customer', 'admin')),
+  role TEXT NOT NULL CHECK (role IN ('customer', 'admin')),
   phone TEXT,
   created_at TEXT NOT NULL
 );
+
+CREATE INDEX IF NOT EXISTS idx_actors_phone ON actors (phone);
 
 CREATE TABLE IF NOT EXISTS sessions (
   token_hash TEXT PRIMARY KEY,
@@ -44,14 +74,21 @@ CREATE TABLE IF NOT EXISTS authorized_admins (
   active INTEGER NOT NULL DEFAULT 1
 );
 
+CREATE TABLE IF NOT EXISTS conversations (
+  id TEXT PRIMARY KEY,
+  actor_id TEXT NOT NULL REFERENCES actors(id),
+  channel TEXT NOT NULL CHECK (channel IN ('web', 'whatsapp', 'demo')),
+  created_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS orders (
   id TEXT PRIMARY KEY,
   actor_id TEXT NOT NULL REFERENCES actors(id),
-  status TEXT NOT NULL CHECK(status IN ('pending_payment', 'paid', 'expired', 'cancelled')),
+  status TEXT NOT NULL CHECK (status IN ('pending_payment', 'paid', 'expired', 'cancelled')),
   subtotal_cents INTEGER NOT NULL,
   shipping_cents INTEGER NOT NULL DEFAULT 0,
   total_cents INTEGER NOT NULL,
-  channel TEXT NOT NULL CHECK(channel IN ('web', 'whatsapp', 'demo')),
+  channel TEXT NOT NULL CHECK (channel IN ('web', 'whatsapp', 'demo')),
   delivery_zone_id TEXT NOT NULL DEFAULT 'pickup',
   reservation_expires_at TEXT NOT NULL,
   created_at TEXT NOT NULL
@@ -62,14 +99,14 @@ CREATE TABLE IF NOT EXISTS sales_requests (
   actor_id TEXT NOT NULL REFERENCES actors(id),
   conversation_id TEXT REFERENCES conversations(id),
   items_json TEXT NOT NULL,
-  subtotal_cents INTEGER NOT NULL CHECK(subtotal_cents >= 0),
-  delivery_method TEXT NOT NULL CHECK(delivery_method IN ('pickup', 'delivery')),
+  subtotal_cents INTEGER NOT NULL CHECK (subtotal_cents >= 0),
+  delivery_method TEXT NOT NULL CHECK (delivery_method IN ('pickup', 'delivery')),
   delivery_zone TEXT NOT NULL DEFAULT '',
   delivery_address TEXT NOT NULL DEFAULT '',
   requested_date TEXT NOT NULL DEFAULT '',
   approved_date TEXT,
   shipping_cents INTEGER,
-  status TEXT NOT NULL CHECK(status IN ('pending', 'approved', 'rejected')),
+  status TEXT NOT NULL CHECK (status IN ('pending', 'approved', 'rejected')),
   order_id TEXT REFERENCES orders(id),
   created_at TEXT NOT NULL,
   reviewed_at TEXT,
@@ -81,7 +118,7 @@ CREATE TABLE IF NOT EXISTS order_items (
   order_id TEXT NOT NULL REFERENCES orders(id) ON DELETE CASCADE,
   variant_id TEXT NOT NULL REFERENCES variants(id),
   sku TEXT NOT NULL,
-  quantity INTEGER NOT NULL CHECK(quantity > 0),
+  quantity INTEGER NOT NULL CHECK (quantity > 0),
   price_cents INTEGER NOT NULL
 );
 
@@ -89,17 +126,17 @@ CREATE TABLE IF NOT EXISTS reservations (
   id TEXT PRIMARY KEY,
   order_id TEXT NOT NULL REFERENCES orders(id) ON DELETE CASCADE,
   variant_id TEXT NOT NULL REFERENCES variants(id),
-  quantity INTEGER NOT NULL CHECK(quantity > 0),
-  status TEXT NOT NULL CHECK(status IN ('active', 'consumed', 'released')),
+  quantity INTEGER NOT NULL CHECK (quantity > 0),
+  status TEXT NOT NULL CHECK (status IN ('active', 'consumed', 'released')),
   created_at TEXT NOT NULL,
-  UNIQUE(order_id, variant_id)
+  UNIQUE (order_id, variant_id)
 );
 
 CREATE TABLE IF NOT EXISTS payments (
   id TEXT PRIMARY KEY,
   order_id TEXT NOT NULL REFERENCES orders(id) ON DELETE CASCADE,
-  status TEXT NOT NULL CHECK(status IN ('pending', 'succeeded', 'failed', 'expired')),
-  mode TEXT NOT NULL CHECK(mode IN ('simulated', 'sandbox', 'live')),
+  status TEXT NOT NULL CHECK (status IN ('pending', 'succeeded', 'failed', 'expired')),
+  mode TEXT NOT NULL CHECK (mode IN ('simulated', 'sandbox', 'live')),
   amount_cents INTEGER NOT NULL,
   provider_reference TEXT NOT NULL,
   checkout_url TEXT NOT NULL,
@@ -114,7 +151,7 @@ CREATE TABLE IF NOT EXISTS admin_proposals (
   action_payload TEXT NOT NULL,
   summary TEXT NOT NULL,
   expected_version INTEGER NOT NULL,
-  status TEXT NOT NULL CHECK(status IN ('pending', 'confirmed', 'expired')),
+  status TEXT NOT NULL CHECK (status IN ('pending', 'confirmed', 'expired')),
   expires_at TEXT NOT NULL,
   created_at TEXT NOT NULL
 );
@@ -132,40 +169,58 @@ CREATE TABLE IF NOT EXISTS audit_events (
 
 CREATE TABLE IF NOT EXISTS social_drafts (
   id TEXT PRIMARY KEY,
-  product_id TEXT NOT NULL REFERENCES products(id),
+  product_id TEXT NOT NULL REFERENCES products(id) ON DELETE CASCADE,
   caption TEXT NOT NULL,
   image_urls TEXT NOT NULL DEFAULT '[]',
-  status TEXT NOT NULL CHECK(status = 'prepared'),
-  mode TEXT NOT NULL CHECK(mode = 'simulated'),
+  status TEXT NOT NULL CHECK (status = 'prepared'),
+  mode TEXT NOT NULL CHECK (mode = 'simulated'),
   created_at TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS social_publications (
   id TEXT PRIMARY KEY,
-  draft_id TEXT NOT NULL REFERENCES social_drafts(id),
-  provider TEXT NOT NULL CHECK(provider IN ('facebook', 'instagram')),
-  status TEXT NOT NULL CHECK(status IN ('publishing', 'published', 'failed', 'unknown')),
+  draft_id TEXT NOT NULL REFERENCES social_drafts(id) ON DELETE CASCADE,
+  provider TEXT NOT NULL CHECK (provider IN ('facebook', 'instagram')),
+  status TEXT NOT NULL CHECK (status IN ('publishing', 'published', 'failed', 'unknown')),
   remote_id TEXT,
   error TEXT,
   attempts INTEGER NOT NULL DEFAULT 1,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
-  UNIQUE(draft_id, provider)
+  UNIQUE (draft_id, provider)
 );
 
-CREATE TABLE IF NOT EXISTS conversations (
-  id TEXT PRIMARY KEY,
-  actor_id TEXT NOT NULL REFERENCES actors(id),
-  channel TEXT NOT NULL CHECK(channel IN ('web', 'whatsapp', 'demo')),
+CREATE TABLE IF NOT EXISTS meta_oauth_states (
+  state_hash TEXT PRIMARY KEY,
+  expires_at TEXT NOT NULL,
   created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS meta_pending_pages (
+  page_id TEXT PRIMARY KEY,
+  page_name TEXT NOT NULL,
+  token_ciphertext TEXT NOT NULL,
+  token_iv TEXT NOT NULL,
+  token_tag TEXT NOT NULL,
+  expires_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS meta_facebook_connection (
+  id INTEGER PRIMARY KEY CHECK (id = 1),
+  page_id TEXT NOT NULL,
+  page_name TEXT NOT NULL,
+  token_ciphertext TEXT NOT NULL,
+  token_iv TEXT NOT NULL,
+  token_tag TEXT NOT NULL,
+  connected_at TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS messages (
   id TEXT PRIMARY KEY,
   conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
-  role TEXT NOT NULL CHECK(role IN ('customer', 'admin', 'assistant', 'human')),
+  role TEXT NOT NULL CHECK (role IN ('customer', 'admin', 'assistant', 'human')),
   text TEXT NOT NULL,
-  channel TEXT NOT NULL CHECK(channel IN ('web', 'whatsapp', 'demo')),
+  channel TEXT NOT NULL CHECK (channel IN ('web', 'whatsapp', 'demo')),
   proposal_id TEXT,
   order_id TEXT,
   handoff INTEGER NOT NULL DEFAULT 0,

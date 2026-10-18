@@ -168,8 +168,11 @@ const TOOLS_SCHEMA = [
     function: {
       name: 'reject_sale',
       description: 'Solo administradora: rechaza una solicitud pendiente e indica el motivo.',
-      parameters: { type: 'object', properties: { requestId: { type: 'string' }, reason: { type: 'string' } },
-        required: ['requestId', 'reason'] }
+      parameters: {
+        type: 'object',
+        properties: { requestId: { type: 'string' }, reason: { type: 'string' } },
+        required: ['requestId', 'reason']
+      }
     }
   },
   {
@@ -232,7 +235,7 @@ export class AgentService {
           sql += ` AND v.size = ?`;
           params.push(size);
         }
-        const rows = db.query(sql, params);
+        const rows = await db.query(sql, params);
         const results = rows.map(r => ({
           productId: r.product_id,
           productName: r.name,
@@ -253,23 +256,24 @@ export class AgentService {
           return { error: 'Acceso denegado: solo la dueña administradora puede registrar productos.' };
         }
         const variantsData = (args.variants || []).map((v, i) => ({
-          sku: v.sku || `ANG-${Date.now().toString().slice(-4)}-T${v.size}-${i+1}`,
+          sku: v.sku || `ANG-${Date.now().toString().slice(-4)}-T${v.size}-${i + 1}`,
           size: String(v.size),
           color: v.color || 'Estándar',
           price: { amountCents: Number(v.priceCents) || 12000, currency: 'PEN' },
           stock: Number(v.stock) || 1
         }));
 
-        const product = catalogService.createProduct({
+        const product = await catalogService.createProduct({
           name: args.name || 'Nuevo Producto Angibell',
           description: args.description || `Prenda confeccionada por Angibell en Huancayo`,
           imageUrls: context.storedImageUrls?.length > 0 ? context.storedImageUrls : args.imageUrls && args.imageUrls.length > 0 ? args.imageUrls : [
             'https://images.unsplash.com/photo-1518831959646-742c3a14ebf7?auto=format&fit=crop&w=800&q=80'
           ],
+          source: 'whatsapp',
           variants: variantsData
         }, actorId);
 
-        const proposal = proposalService.createProposal({
+        const proposal = await proposalService.createProposal({
           kind: 'publish_product',
           productId: product.id,
           expectedVersion: product.version
@@ -279,7 +283,7 @@ export class AgentService {
           success: true,
           proposalId: proposal.id,
           productName: product.name,
-          variants: variantsData.map(v => `Talla ${v.size} (${v.color}) - S/ ${(v.price.amountCents/100).toFixed(2)} - Stock: ${v.stock}`),
+          variants: variantsData.map(v => `Talla ${v.size} (${v.color}) - S/ ${(v.price.amountCents / 100).toFixed(2)} - Stock: ${v.stock}`),
           expiresAt: proposal.expiresAt,
           summary: proposal.summary,
           confirmationRequired: true
@@ -293,9 +297,14 @@ export class AgentService {
         let propId = args.proposalId;
         if (!propId) {
           // Look up latest pending proposal for actor
-          const latest = db.queryOne(`SELECT id FROM admin_proposals WHERE actor_id = ? AND status = 'pending' ORDER BY created_at DESC LIMIT 1`, [actorId]);
+          const latest = await db.queryOne(
+            `SELECT id FROM admin_proposals WHERE actor_id = $1 AND status = 'pending' ORDER BY created_at DESC LIMIT 1`,
+            [actorId]
+          );
           if (!latest) {
-            const anyPending = db.queryOne(`SELECT id FROM admin_proposals WHERE status = 'pending' ORDER BY created_at DESC LIMIT 1`);
+            const anyPending = await db.queryOne(
+              `SELECT id FROM admin_proposals WHERE status = 'pending' ORDER BY created_at DESC LIMIT 1`
+            );
             if (anyPending) {
               propId = anyPending.id;
             } else {
@@ -306,7 +315,7 @@ export class AgentService {
           }
         }
 
-        const outcome = proposalService.confirmProposal(propId, actorId, 'CONFIRM');
+        const outcome = await proposalService.confirmProposal(propId, actorId, 'CONFIRM');
         return {
           success: true,
           proposalId: propId,
@@ -326,18 +335,22 @@ export class AgentService {
 
       case 'create_order': {
         if (userRole !== 'customer') return { error: 'Esta herramienta es para solicitudes de clientes.' };
-        const request = salesService.createRequest(args, actorId, conversationId);
+        const request = await salesService.createRequest(args, actorId, conversationId);
         try { await salesService.notifyAdmin(request); } catch (error) {
           console.error('No se pudo avisar la solicitud de venta a la administradora:', error.message);
         }
-        return { success: true, requestId: request.id, status: 'pending_admin_validation',
+        return {
+          success: true,
+          requestId: request.id,
+          status: 'pending_admin_validation',
           subtotalSoles: (request.subtotalCents / 100).toFixed(2),
-          message: 'Solicitud enviada a validación. Fecha, delivery, stock final y pago aún no están confirmados.' };
+          message: 'Solicitud enviada a validación. Fecha, delivery, stock final y pago aún no están confirmados.'
+        };
       }
 
       case 'list_pending_sales': {
         if (userRole !== 'admin') return { error: 'Acceso denegado.' };
-        return { items: salesService.listPending() };
+        return { items: await salesService.listPending() };
       }
 
       case 'approve_sale': {
@@ -349,14 +362,14 @@ export class AgentService {
         if (!source.includes(args.requestId) || explicitDate !== args.deliveryDate || shippingCents !== Number(args.shippingCents)) {
           return { error: 'Para aprobar, escribe: APROBAR <ID de solicitud> fecha YYYY-MM-DD envío S/ 0.00 (o el costo validado).' };
         }
-        const approval = salesService.approveRequest(args.requestId, actorId, args);
+        const approval = await salesService.approveRequest(args.requestId, actorId, args);
         approval.customerNotification = await salesService.notifyCustomer(approval.id);
         return approval;
       }
 
       case 'reject_sale': {
         if (userRole !== 'admin') return { error: 'Acceso denegado.' };
-        return salesService.rejectRequest(args.requestId, actorId, args.reason);
+        return await salesService.rejectRequest(args.requestId, actorId, args.reason);
       }
 
       case 'request_human_handoff': {
@@ -371,10 +384,10 @@ export class AgentService {
       case 'create_social_draft': {
         let prod = null;
         if (args.productId) {
-          prod = db.queryOne(`SELECT * FROM products WHERE id = ?`, [args.productId]);
+          prod = await db.queryOne(`SELECT * FROM products WHERE id = $1`, [args.productId]);
         }
         if (!prod) {
-          prod = db.queryOne(`SELECT * FROM products ORDER BY created_at DESC LIMIT 1`);
+          prod = await db.queryOne(`SELECT * FROM products ORDER BY created_at DESC LIMIT 1`);
         }
         if (!prod) {
           return { error: 'No se encontró un producto para asociar a la publicación.' };
@@ -384,10 +397,11 @@ export class AgentService {
         const nowIso = new Date().toISOString();
         const caption = args.instagramCopy || args.facebookCopy ||
           `Nueva prenda en Angibell Creaciones: ${prod.name}.\n\n${prod.description}\n\nConsulta tallas y disponibilidad con la tienda.`;
-        db.execute(`
-          INSERT INTO social_drafts (id, product_id, caption, image_urls, status, mode, created_at)
-          VALUES (?, ?, ?, ?, 'prepared', 'simulated', ?)
-        `, [draftId, prod.id, caption, prod.image_urls || '[]', nowIso]);
+        await db.execute(
+          `INSERT INTO social_drafts (id, product_id, caption, image_urls, status, mode, created_at)
+           VALUES ($1, $2, $3, $4, 'prepared', 'simulated', $5)`,
+          [draftId, prod.id, caption, prod.image_urls || '[]', nowIso]
+        );
 
         return {
           success: true,
@@ -408,11 +422,12 @@ export class AgentService {
    */
   async processMessage({ conversationId, actorId, userRole, text, imageUrls = [], storedImageUrls = [], channel = 'whatsapp' }) {
     // 1. Obtener historial reciente de mensajes
-    const historyRows = db.query(`
-      SELECT role, text, created_at FROM messages
-      WHERE conversation_id = ?
-      ORDER BY created_at DESC LIMIT 8
-    `, [conversationId]);
+    const historyRows = await db.query(
+      `SELECT role, text, created_at FROM messages
+       WHERE conversation_id = $1
+       ORDER BY created_at DESC LIMIT 8`,
+      [conversationId]
+    );
     historyRows.reverse();
 
     if (!isWithinAngibellScope(text, historyRows)) {

@@ -1,0 +1,13 @@
+{
+  "name": "@angibell/api",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node src/main.js",
+    "test": "node --test src/api.test.js"
+  },
+  "dependencies": {
+    "pg": "8.23.0"
+  }
+}

@@ -34,9 +34,10 @@ export class WppConnectService {
     return new Promise(resolve => setTimeout(resolve, ms));
   }
 
-  isAuthorizedAdmin(senderPhone) {
+  async isAuthorizedAdmin(senderPhone) {
     const formattedPhone = `+${String(senderPhone || '').replace(/[^0-9]/g, '')}`;
-    return Boolean(db.queryOne(`SELECT phone FROM authorized_admins WHERE phone = ? AND active = 1`, [formattedPhone]));
+    const row = await db.queryOne(`SELECT phone FROM authorized_admins WHERE phone = $1 AND active = 1`, [formattedPhone]);
+    return Boolean(row);
   }
 
   storeAdminImage(mediaData, declaredMimeType = '') {
@@ -387,7 +388,7 @@ export class WppConnectService {
     }
 
     if (isImage) {
-      if (!this.isAuthorizedAdmin(senderPhone, isSelf)) {
+      if (!(await this.isAuthorizedAdmin(senderPhone))) {
         console.log(`🔒 [WppConnect] Imagen de +${senderPhone} ignorada: no es administrador.`);
         return;
       }
@@ -446,22 +447,28 @@ export class WppConnectService {
 
     // 3. Detectar rol y usuario
     const formattedPhone = `+${senderPhone}`;
-    const isAdmin = this.isAuthorizedAdmin(senderPhone, isSelf);
+    const isAdmin = await this.isAuthorizedAdmin(senderPhone);
     const role = isAdmin ? 'admin' : 'customer';
 
     // Buscar o crear actor y conversación
-    let actor = db.queryOne(`SELECT id, role FROM actors WHERE phone = ?`, [formattedPhone]);
+    let actor = await db.queryOne(`SELECT id, role FROM actors WHERE phone = $1`, [formattedPhone]);
     const nowIso = new Date().toISOString();
     if (!actor) {
       const actorId = crypto.randomUUID();
-      db.execute(`INSERT INTO actors (id, role, phone, created_at) VALUES (?, ?, ?, ?)`, [actorId, role, formattedPhone, nowIso]);
+      await db.execute(
+        `INSERT INTO actors (id, role, phone, created_at) VALUES ($1, $2, $3, $4)`,
+        [actorId, role, formattedPhone, nowIso]
+      );
       actor = { id: actorId, role };
     }
 
-    let conv = db.queryOne(`SELECT id FROM conversations WHERE actor_id = ? AND channel = 'whatsapp'`, [actor.id]);
+    let conv = await db.queryOne(`SELECT id FROM conversations WHERE actor_id = $1 AND channel = 'whatsapp'`, [actor.id]);
     if (!conv) {
       const convId = crypto.randomUUID();
-      db.execute(`INSERT INTO conversations (id, actor_id, channel, created_at) VALUES (?, ?, 'whatsapp', ?)`, [convId, actor.id, nowIso]);
+      await db.execute(
+        `INSERT INTO conversations (id, actor_id, channel, created_at) VALUES ($1, $2, 'whatsapp', $3)`,
+        [convId, actor.id, nowIso]
+      );
       conv = { id: convId };
     }
 

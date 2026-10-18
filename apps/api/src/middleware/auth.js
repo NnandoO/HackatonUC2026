@@ -1,5 +1,6 @@
 import crypto from 'node:crypto';
 import { db } from '../database/db.js';
+
 export function parseCookies(req) {
     const header = req.headers.cookie;
     if (!header)
@@ -12,7 +13,8 @@ export function parseCookies(req) {
     }
     return cookies;
 }
-export function getAuthContext(req) {
+
+export async function getAuthContext(req) {
     const configuredServiceKey = process.env.ANGIBELL_ADMIN_SERVICE_KEY || '';
     const providedServiceKey = req.headers['x-angibell-admin-key'] || '';
     if (configuredServiceKey && typeof providedServiceKey === 'string') {
@@ -20,33 +22,53 @@ export function getAuthContext(req) {
         const provided = Buffer.from(providedServiceKey);
         if (expected.length === provided.length && crypto.timingSafeEqual(expected, provided)) {
             const actorId = 'web-panel-service';
-            const actor = db.queryOne(`SELECT id FROM actors WHERE id = ?`, [actorId]);
-            if (!actor) {
-                db.execute(`INSERT INTO actors (id, role, created_at) VALUES (?, 'admin', ?)`, [actorId, new Date().toISOString()]);
-            }
+            await db.execute(
+                `INSERT INTO actors (id, role, created_at) VALUES ($1, 'admin', $2) ON CONFLICT (id) DO NOTHING`,
+                [actorId, new Date().toISOString()]
+            );
             return { actorId, role: 'admin' };
         }
     }
+
     const authHeader = req.headers.authorization;
     const cookies = parseCookies(req);
     const token = authHeader?.replace(/^Bearer\s+/i, '') || cookies['angibell_session'];
+    const isReadOnly = ['GET', 'HEAD', 'OPTIONS'].includes(req.method?.toUpperCase() || 'GET');
+
     if (!token) {
-        // Generate an ephemeral customer session if none provided
         const actorId = crypto.randomUUID();
-        db.execute(`INSERT INTO actors (id, role, created_at) VALUES (?, 'customer', ?)`, [actorId, new Date().toISOString()]);
+        if (!isReadOnly) {
+            await db.execute(
+                `INSERT INTO actors (id, role, created_at) VALUES ($1, 'customer', $2) ON CONFLICT (id) DO NOTHING`,
+                [actorId, new Date().toISOString()]
+            );
+        }
         return { actorId, role: 'customer' };
     }
+
     const tokenHash = crypto.createHash('sha256').update(token).digest('hex');
-    const session = db.queryOne(`SELECT s.*, a.role, a.phone
-     FROM sessions s
-     JOIN actors a ON s.actor_id = a.id
-     WHERE s.token_hash = ? AND s.expires_at > ?`, [tokenHash, new Date().toISOString()]);
+    const session = await db.queryOne(
+        `SELECT s.*, a.role, a.phone
+         FROM sessions s
+         JOIN actors a ON s.actor_id = a.id
+         WHERE s.token_hash = $1 AND s.expires_at > $2`,
+        [tokenHash, new Date().toISOString()]
+    );
+
     if (session) {
         if (session.role === 'admin') {
-            const authorized = db.queryOne(`SELECT phone FROM authorized_admins WHERE actor_id = ? AND active = 1`, [session.actor_id]);
+            const authorized = await db.queryOne(
+                `SELECT phone FROM authorized_admins WHERE actor_id = $1 AND active = 1`,
+                [session.actor_id]
+            );
             if (!authorized) {
                 const actorId = crypto.randomUUID();
-                db.execute(`INSERT INTO actors (id, role, created_at) VALUES (?, 'customer', ?)`, [actorId, new Date().toISOString()]);
+                if (!isReadOnly) {
+                    await db.execute(
+                        `INSERT INTO actors (id, role, created_at) VALUES ($1, 'customer', $2) ON CONFLICT (id) DO NOTHING`,
+                        [actorId, new Date().toISOString()]
+                    );
+                }
                 return { actorId, role: 'customer' };
             }
         }
@@ -56,41 +78,66 @@ export function getAuthContext(req) {
             phone: session.phone || undefined,
         };
     }
+
     // Fallback to customer
     const actorId = crypto.randomUUID();
-    db.execute(`INSERT INTO actors (id, role, created_at) VALUES (?, 'customer', ?)`, [actorId, new Date().toISOString()]);
+    if (!isReadOnly) {
+        await db.execute(
+            `INSERT INTO actors (id, role, created_at) VALUES ($1, 'customer', $2) ON CONFLICT (id) DO NOTHING`,
+            [actorId, new Date().toISOString()]
+        );
+    }
     return { actorId, role: 'customer' };
 }
-export function createCustomerSession(actorId) {
+
+export async function createCustomerSession(actorId) {
     const id = actorId || crypto.randomUUID();
     const token = `ang_cust_${crypto.randomBytes(24).toString('hex')}`;
     const tokenHash = crypto.createHash('sha256').update(token).digest('hex');
     const now = new Date();
     const expiresAt = new Date(now.getTime() + 30 * 24 * 60 * 60 * 1000).toISOString(); // 30 days
-    db.transaction(() => {
-        const existing = db.queryOne(`SELECT id FROM actors WHERE id = ?`, [id]);
-        if (!existing) {
-            db.execute(`INSERT INTO actors (id, role, created_at) VALUES (?, 'customer', ?)`, [id, now.toISOString()]);
-        }
-        db.execute(`INSERT INTO sessions (token_hash, actor_id, expires_at, created_at) VALUES (?, ?, ?, ?)`, [tokenHash, id, expiresAt, now.toISOString()]);
+    await db.transaction(async () => {
+        await db.execute(
+            `INSERT INTO actors (id, role, created_at) VALUES ($1, 'customer', $2) ON CONFLICT (id) DO NOTHING`,
+            [id, now.toISOString()]
+        );
+        await db.execute(
+            `INSERT INTO sessions (token_hash, actor_id, expires_at, created_at) VALUES ($1, $2, $3, $4)`,
+            [tokenHash, id, expiresAt, now.toISOString()]
+        );
     });
     return { token, expiresAt, actorId: id };
 }
-export function createAdminSession(phone = '+51995992450') {
-    const actorId = crypto.randomUUID();
+
+export async function createAdminSession(phone = '+51995992450') {
+    const newActorId = crypto.randomUUID();
     const token = `ang_admin_${crypto.randomBytes(24).toString('hex')}`;
     const tokenHash = crypto.createHash('sha256').update(token).digest('hex');
     const now = new Date();
     const expiresAt = new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000).toISOString(); // 7 days
-    db.transaction(() => {
-        const existing = db.queryOne(`SELECT * FROM authorized_admins WHERE phone = ?`, [phone]);
+    let finalActorId = newActorId;
+    await db.transaction(async () => {
+        const existing = await db.queryOne(`SELECT * FROM authorized_admins WHERE phone = $1`, [phone]);
         if (!existing) {
-            db.execute(`INSERT INTO actors (id, role, phone, created_at) VALUES (?, 'admin', ?, ?)`, [actorId, phone, now.toISOString()]);
-            db.execute(`INSERT INTO authorized_admins (actor_id, phone, active) VALUES (?, ?, 1)`, [actorId, phone]);
-            db.execute(`INSERT INTO sessions (token_hash, actor_id, expires_at, created_at) VALUES (?, ?, ?, ?)`, [tokenHash, actorId, expiresAt, now.toISOString()]);
+            await db.execute(
+                `INSERT INTO actors (id, role, phone, created_at) VALUES ($1, 'admin', $2, $3)`,
+                [newActorId, phone, now.toISOString()]
+            );
+            await db.execute(
+                `INSERT INTO authorized_admins (actor_id, phone, active) VALUES ($1, $2, 1)`,
+                [newActorId, phone]
+            );
+            await db.execute(
+                `INSERT INTO sessions (token_hash, actor_id, expires_at, created_at) VALUES ($1, $2, $3, $4)`,
+                [tokenHash, newActorId, expiresAt, now.toISOString()]
+            );
         } else {
-            db.execute(`INSERT INTO sessions (token_hash, actor_id, expires_at, created_at) VALUES (?, ?, ?, ?)`, [tokenHash, existing.actor_id, expiresAt, now.toISOString()]);
+            finalActorId = existing.actor_id;
+            await db.execute(
+                `INSERT INTO sessions (token_hash, actor_id, expires_at, created_at) VALUES ($1, $2, $3, $4)`,
+                [tokenHash, existing.actor_id, expiresAt, now.toISOString()]
+            );
         }
     });
-    return { token, expiresAt, actorId };
+    return { token, expiresAt, actorId: finalActorId };
 }

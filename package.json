@@ -3,5 +3,6 @@
   "packageManager": "pnpm@10.30.3",
   "engines": { "node": ">=22 <27" },
   "scripts": { "check": "node scripts/check-contracts.mjs", "typecheck": "pnpm --filter @angibell/contracts typecheck" },
+  "dependencies": { "pg": "8.23.0" },
   "devDependencies": { "typescript": "5.8.3" }
 }

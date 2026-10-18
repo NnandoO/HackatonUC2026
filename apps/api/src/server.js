@@ -19,7 +19,14 @@ import { checkIdempotency, saveIdempotency } from './middleware/idempotency.js';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const MEDIA_DIR = process.env.MEDIA_DIR || path.resolve(__dirname, '../../../.state/media');
-const MEDIA_TYPES = { jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png', webp: 'image/webp' };
+const MEDIA_TYPES = {
+    jpg: 'image/jpeg',
+    jpeg: 'image/jpeg',
+    png: 'image/png',
+    webp: 'image/webp',
+    avif: 'image/avif',
+    gif: 'image/gif',
+};
 
 export function verifyMetaSignature(rawBody, signatureHeader, appSecret) {
     if (!appSecret || typeof signatureHeader !== 'string' || !/^sha256=[a-f0-9]{64}$/i.test(signatureHeader)) return false;
@@ -34,7 +41,7 @@ export function sendJson(res, statusCode, data, requestId) {
         'Content-Type': 'application/json; charset=utf-8',
         'Access-Control-Allow-Origin': '*',
         'Access-Control-Allow-Methods': 'GET, POST, PUT, PATCH, DELETE, OPTIONS',
-        'Access-Control-Allow-Headers': 'Content-Type, Authorization, Idempotency-Key, X-Request-Id',
+        'Access-Control-Allow-Headers': 'Content-Type, Authorization, Idempotency-Key, X-Request-Id, X-Angibell-Admin-Key',
         ...(requestId ? { 'X-Request-Id': requestId } : {}),
     });
     res.end(body);
@@ -75,7 +82,7 @@ export function createServer() {
             res.writeHead(204, {
                 'Access-Control-Allow-Origin': '*',
                 'Access-Control-Allow-Methods': 'GET, POST, PUT, PATCH, DELETE, OPTIONS',
-                'Access-Control-Allow-Headers': 'Content-Type, Authorization, Idempotency-Key, X-Request-Id',
+                'Access-Control-Allow-Headers': 'Content-Type, Authorization, Idempotency-Key, X-Request-Id, X-Angibell-Admin-Key',
             });
             res.end();
             return;
@@ -85,11 +92,10 @@ export function createServer() {
         const pathname = parsedUrl.pathname;
         const query = Object.fromEntries(parsedUrl.searchParams.entries());
         const method = req.method?.toUpperCase();
-        const auth = getAuthContext(req);
 
         try {
-            // Fotos cargadas por el administrador. El nombre aleatorio evita enumeración predecible.
-            const mediaMatch = pathname.match(/^\/media\/([a-f0-9-]+\.(?:jpg|jpeg|png|webp))$/i);
+            // Fotos cargadas por el administrador o web.
+            const mediaMatch = pathname.match(/^\/media\/([a-z0-9_-]+\.(?:jpg|jpeg|png|webp|avif|gif))$/i);
             if (method === 'GET' && mediaMatch) {
                 const filename = mediaMatch[1];
                 const mediaPath = path.join(MEDIA_DIR, filename);
@@ -98,7 +104,7 @@ export function createServer() {
                 }
                 const extension = path.extname(filename).slice(1).toLowerCase();
                 res.writeHead(200, {
-                    'Content-Type': MEDIA_TYPES[extension],
+                    'Content-Type': MEDIA_TYPES[extension] || 'application/octet-stream',
                     'Content-Length': fs.statSync(mediaPath).size,
                     'Cache-Control': 'public, max-age=31536000, immutable',
                     'X-Content-Type-Options': 'nosniff'
@@ -214,10 +220,22 @@ export function createServer() {
                 return;
             }
 
+            // 1. GET /v1/health
+            if (method === 'GET' && pathname === '/v1/health') {
+                const probe = await db.queryOne('SELECT 1 as ok');
+                return sendJson(res, 200, {
+                    status: probe?.ok === 1 ? 'ok' : 'error',
+                    db: probe?.ok === 1 ? 'connected' : 'disconnected',
+                    mode: 'simulated',
+                    service: 'ANGIBELL 360 Core API',
+                    version: '1.0.0',
+                }, requestId);
+            }
+
             // 0.1 GET /checkout/simulated -> Pasarela de pago Culqi Simulada
             if (method === 'GET' && pathname === '/checkout/simulated') {
                 const orderId = query.orderId || '';
-                const order = db.queryOne(`SELECT * FROM orders WHERE id = ?`, [orderId]);
+                const order = await db.queryOne(`SELECT * FROM orders WHERE id = $1`, [orderId]);
                 const totalFormatted = order ? (order.total_cents / 100).toFixed(2) : '120.00';
                 const status = order ? order.status : 'pending_payment';
 
@@ -272,19 +290,30 @@ export function createServer() {
                 return;
             }
 
-            // 1. GET /v1/health
-            if (method === 'GET' && pathname === '/v1/health') {
-                return sendJson(res, 200, {
-                    status: 'ok',
-                    mode: 'simulated',
-                    service: 'ANGIBELL 360 Core API',
-                    version: '1.0.0',
-                }, requestId);
+            // Meta redirects the browser here; state is single-use and validated by the service.
+            if (method === 'GET' && pathname === '/v1/admin/meta/facebook/oauth/callback') {
+                const returnUrl = new URL(process.env.META_PANEL_RETURN_URL || 'http://localhost:3002/panel');
+                const redirect = (status) => {
+                    returnUrl.searchParams.set('facebook', status);
+                    res.writeHead(303, { Location: returnUrl.toString(), 'Cache-Control': 'no-store' });
+                    res.end();
+                };
+                const { code, state, error: oauthError } = query;
+                if (oauthError || !code || !state) return redirect('cancelled');
+                try {
+                    await socialService.completeFacebookOAuth(code, state);
+                    return redirect('choose-page');
+                } catch (error) {
+                    console.error(`[${requestId}] Meta OAuth callback failed:`, error.message);
+                    return redirect('failed');
+                }
             }
+
+            const auth = await getAuthContext(req);
 
             // 2. POST /v1/sessions
             if (method === 'POST' && pathname === '/v1/sessions') {
-                const session = createCustomerSession(auth.actorId);
+                const session = await createCustomerSession(auth.actorId);
                 res.setHeader('Set-Cookie', `angibell_session=${session.token}; Path=/; HttpOnly; SameSite=Lax; Max-Age=2592000`);
                 return sendJson(res, 201, {
                     token: session.token,
@@ -294,14 +323,14 @@ export function createServer() {
 
             // 3. GET /v1/products
             if (method === 'GET' && pathname === '/v1/products') {
-                const result = catalogService.getProducts(query);
+                const result = await catalogService.getProducts(query);
                 return sendJson(res, 200, result, requestId);
             }
 
-            // 4. GET /v1/products/:id
+            // 4. GET /v1/products/:idOrSlug
             const prodMatch = pathname.match(/^\/v1\/products\/([a-zA-Z0-9_-]+)$/);
             if (method === 'GET' && prodMatch && prodMatch[1]) {
-                const prod = catalogService.getProductById(prodMatch[1]);
+                const prod = await catalogService.getProductById(prodMatch[1]);
                 if (!prod || prod.status !== 'published') {
                     return sendError(res, 404, 'NOT_FOUND', 'Producto no encontrado o no disponible.', requestId);
                 }
@@ -315,7 +344,7 @@ export function createServer() {
                 }
                 const bodyRaw = await readBody(req);
                 const input = JSON.parse(bodyRaw || '{}');
-                const prod = catalogService.createProduct(input, auth.actorId);
+                const prod = await catalogService.createProduct(input, auth.actorId);
                 return sendJson(res, 201, prod, requestId);
             }
 
@@ -324,8 +353,54 @@ export function createServer() {
                 if (auth.role !== 'admin') {
                     return sendError(res, 403, 'FORBIDDEN', 'Acceso denegado: requiere rol de administrador.', requestId);
                 }
-                const result = catalogService.adminGetProducts(query);
+                const result = await catalogService.adminGetProducts(query);
                 return sendJson(res, 200, result, requestId);
+            }
+
+            // 6.1 GET /v1/admin/products/:id
+            const adminProdMatch = pathname.match(/^\/v1\/admin\/products\/([a-zA-Z0-9_-]+)$/);
+            if (method === 'GET' && adminProdMatch && adminProdMatch[1]) {
+                if (auth.role !== 'admin') {
+                    return sendError(res, 403, 'FORBIDDEN', 'Acceso denegado: requiere rol de administrador.', requestId);
+                }
+                const prod = await catalogService.getProductById(adminProdMatch[1]);
+                if (!prod) {
+                    return sendError(res, 404, 'NOT_FOUND', 'Producto no encontrado.', requestId);
+                }
+                return sendJson(res, 200, prod, requestId);
+            }
+
+            // 6.2 PATCH /v1/admin/products/:id/status
+            const prodStatusMatch = pathname.match(/^\/v1\/admin\/products\/([a-zA-Z0-9_-]+)\/status$/);
+            if (method === 'PATCH' && prodStatusMatch && prodStatusMatch[1]) {
+                if (auth.role !== 'admin') {
+                    return sendError(res, 403, 'FORBIDDEN', 'Acceso denegado: requiere rol de administrador.', requestId);
+                }
+                const bodyRaw = await readBody(req);
+                const input = JSON.parse(bodyRaw || '{}');
+                const prod = await catalogService.setProductStatus(prodStatusMatch[1], input.status, auth.actorId);
+                return sendJson(res, 200, prod, requestId);
+            }
+
+            // 6.3 GET /v1/admin/publications & POST /v1/admin/publications
+            if (pathname === '/v1/admin/publications') {
+                if (auth.role !== 'admin') {
+                    return sendError(res, 403, 'FORBIDDEN', 'Acceso denegado: requiere rol de administrador.', requestId);
+                }
+                if (method === 'GET') {
+                    const items = await catalogService.listPublications(query.limit);
+                    return sendJson(res, 200, { items }, requestId);
+                }
+                if (method === 'POST') {
+                    const bodyRaw = await readBody(req);
+                    const input = JSON.parse(bodyRaw || '{}');
+                    const pub = await catalogService.recordPublication(
+                        input.productId || input.product_id || null,
+                        input.payload ?? input,
+                        input.note || ''
+                    );
+                    return sendJson(res, 201, pub, requestId);
+                }
             }
 
             if (method === 'PATCH' && pathname === '/v1/admin/stock') {
@@ -337,23 +412,28 @@ export function createServer() {
                     return sendError(res, 400, 'INVALID_INPUT', 'updates debe contener entre 1 y 200 variantes.', requestId);
                 }
                 const now = new Date().toISOString();
-                db.transaction(() => {
+                await db.transaction(async () => {
+                    await db.execute(
+                        `INSERT INTO actors (id, role, created_at) VALUES ($1, 'admin', $2) ON CONFLICT (id) DO NOTHING`,
+                        [auth.actorId, now]
+                    );
                     for (const update of input.updates) {
                         const variantId = String(update.variantId || '');
                         const stock = Number(update.stock);
                         if (!/^[a-zA-Z0-9_-]{1,80}$/.test(variantId) || !Number.isSafeInteger(stock) || stock < 0 || stock > 100000) {
                             throw new Error('INVALID_INPUT: Cada ajuste necesita variantId y stock entero válido.');
                         }
-                        const variant = db.queryOne(`SELECT id, stock_reserved FROM variants WHERE id = ?`, [variantId]);
+                        const variant = await db.queryOne(`SELECT id, stock_reserved FROM variants WHERE id = $1 FOR UPDATE`, [variantId]);
                         if (!variant) throw new Error(`NOT_FOUND: Variante ${variantId} no encontrada.`);
                         if (stock < variant.stock_reserved) {
                             throw new Error(`CONFLICT: El stock no puede quedar por debajo de las unidades reservadas (${variant.stock_reserved}).`);
                         }
-                        db.execute(`UPDATE variants SET stock_on_hand = ?, version = version + 1 WHERE id = ?`, [stock, variantId]);
-                        db.execute(`INSERT INTO audit_events (id, actor_id, action, entity_id, request_id, changes, created_at)
-                          VALUES (?, ?, 'set_stock', ?, ?, ?, ?)`,
-                          [crypto.randomUUID(), auth.actorId, variantId, requestId,
-                            JSON.stringify({ stockOnHand: stock }), now]);
+                        await db.execute(`UPDATE variants SET stock_on_hand = $1, version = version + 1 WHERE id = $2`, [stock, variantId]);
+                        await db.execute(
+                            `INSERT INTO audit_events (id, actor_id, action, entity_id, request_id, changes, created_at)
+                             VALUES ($1, $2, 'set_stock', $3, $4, $5, $6)`,
+                            [crypto.randomUUID(), auth.actorId, variantId, requestId, JSON.stringify({ stockOnHand: stock }), now]
+                        );
                     }
                 });
                 return sendJson(res, 200, { ok: true, actualizadas: input.updates.length }, requestId);
@@ -366,7 +446,7 @@ export function createServer() {
                 }
                 const bodyRaw = await readBody(req);
                 const action = JSON.parse(bodyRaw || '{}');
-                const proposal = proposalService.createProposal(action, auth.actorId);
+                const proposal = await proposalService.createProposal(action, auth.actorId);
                 return sendJson(res, 201, proposal, requestId);
             }
 
@@ -378,7 +458,7 @@ export function createServer() {
                 }
                 const bodyRaw = await readBody(req);
                 const body = JSON.parse(bodyRaw || '{}');
-                const result = proposalService.confirmProposal(confirmMatch[1], auth.actorId, body.confirmation);
+                const result = await proposalService.confirmProposal(confirmMatch[1], auth.actorId, body.confirmation);
                 return sendJson(res, 200, result, requestId);
             }
 
@@ -389,7 +469,7 @@ export function createServer() {
                     return sendError(res, 400, 'INVALID_INPUT', 'Falta encabezado Idempotency-Key.', requestId);
                 }
                 const bodyRaw = await readBody(req);
-                const cached = checkIdempotency(auth.actorId, pathname, idempotencyKey, bodyRaw);
+                const cached = await checkIdempotency(auth.actorId, pathname, idempotencyKey, bodyRaw);
                 if (cached === 'CONFLICT') {
                     return sendError(res, 409, 'CONFLICT', 'Idempotency-Key reutilizada con cuerpo distinto.', requestId);
                 }
@@ -397,15 +477,15 @@ export function createServer() {
                     return sendJson(res, cached.responseCode, JSON.parse(cached.responseBody), requestId);
                 }
                 const input = JSON.parse(bodyRaw || '{}');
-                const order = orderService.createOrder(input, auth.actorId);
-                saveIdempotency(auth.actorId, pathname, idempotencyKey, bodyRaw, 201, JSON.stringify(order));
+                const order = await orderService.createOrder(input, auth.actorId);
+                await saveIdempotency(auth.actorId, pathname, idempotencyKey, bodyRaw, 201, JSON.stringify(order));
                 return sendJson(res, 201, order, requestId);
             }
 
             // 10. GET /v1/orders/:id
             const orderMatch = pathname.match(/^\/v1\/orders\/([a-zA-Z0-9_-]+)$/);
             if (method === 'GET' && orderMatch && orderMatch[1]) {
-                const order = orderService.getOrderById(orderMatch[1], auth.actorId, auth.role === 'admin');
+                const order = await orderService.getOrderById(orderMatch[1], auth.actorId, auth.role === 'admin');
                 if (!order) {
                     return sendError(res, 404, 'NOT_FOUND', 'Pedido no encontrado.', requestId);
                 }
@@ -417,20 +497,20 @@ export function createServer() {
                 if (auth.role !== 'admin') {
                     return sendError(res, 403, 'FORBIDDEN', 'Acceso denegado: requiere rol de administrador.', requestId);
                 }
-                const orders = orderService.adminGetOrders(query);
+                const orders = await orderService.adminGetOrders(query);
                 return sendJson(res, 200, orders, requestId);
             }
 
             if (method === 'GET' && pathname === '/v1/admin/sales-requests') {
                 if (auth.role !== 'admin') return sendError(res, 403, 'FORBIDDEN', 'Solo administradora.', requestId);
-                return sendJson(res, 200, { items: salesService.listPending(query.limit) }, requestId);
+                return sendJson(res, 200, { items: await salesService.listPending(query.limit) }, requestId);
             }
 
             const saleApproveMatch = pathname.match(/^\/v1\/admin\/sales-requests\/([a-zA-Z0-9_-]+)\/approve$/);
             if (method === 'POST' && saleApproveMatch) {
                 if (auth.role !== 'admin') return sendError(res, 403, 'FORBIDDEN', 'Solo administradora.', requestId);
                 const input = JSON.parse(await readBody(req) || '{}');
-                const result = salesService.approveRequest(saleApproveMatch[1], auth.actorId, input, requestId);
+                const result = await salesService.approveRequest(saleApproveMatch[1], auth.actorId, input, requestId);
                 result.customerNotification = await salesService.notifyCustomer(result.id);
                 return sendJson(res, 200, result, requestId);
             }
@@ -439,20 +519,20 @@ export function createServer() {
             if (method === 'POST' && saleRejectMatch) {
                 if (auth.role !== 'admin') return sendError(res, 403, 'FORBIDDEN', 'Solo administradora.', requestId);
                 const input = JSON.parse(await readBody(req) || '{}');
-                return sendJson(res, 200, salesService.rejectRequest(saleRejectMatch[1], auth.actorId, input.reason, requestId), requestId);
+                return sendJson(res, 200, await salesService.rejectRequest(saleRejectMatch[1], auth.actorId, input.reason, requestId), requestId);
             }
 
             // 12. POST /v1/orders/:id/payments
             const payMatch = pathname.match(/^\/v1\/orders\/([a-zA-Z0-9_-]+)\/payments$/);
             if (method === 'POST' && payMatch && payMatch[1]) {
-                const payment = paymentService.createPayment(payMatch[1], auth.actorId, 'simulated');
+                const payment = await paymentService.createPayment(payMatch[1], auth.actorId, 'simulated');
                 return sendJson(res, 201, payment, requestId);
             }
 
             // 13. GET /v1/orders/:id/payment
             const getPayMatch = pathname.match(/^\/v1\/orders\/([a-zA-Z0-9_-]+)\/payment$/);
             if (method === 'GET' && getPayMatch && getPayMatch[1]) {
-                const payment = paymentService.getPaymentByOrderId(getPayMatch[1]);
+                const payment = await paymentService.getPaymentByOrderId(getPayMatch[1]);
                 if (!payment) {
                     return sendError(res, 404, 'NOT_FOUND', 'No hay pagos asociados para este pedido.', requestId);
                 }
@@ -463,7 +543,7 @@ export function createServer() {
             if (method === 'POST' && pathname === '/v1/conversations') {
                 const bodyRaw = await readBody(req);
                 const body = JSON.parse(bodyRaw || '{}');
-                const conv = chatService.createConversation(auth.actorId, body.channel || 'web');
+                const conv = await chatService.createConversation(auth.actorId, body.channel || 'web');
                 return sendJson(res, 201, conv, requestId);
             }
 
@@ -481,8 +561,26 @@ export function createServer() {
                 if (auth.role !== 'admin') {
                     return sendError(res, 403, 'FORBIDDEN', 'Acceso denegado: requiere rol de administrador.', requestId);
                 }
-                const drafts = socialService.getSocialDrafts(query);
+                const drafts = await socialService.getSocialDrafts(query);
                 return sendJson(res, 200, drafts, requestId);
+            }
+
+            // 16.0 Facebook Page connection (OAuth callback is proxied by the authenticated web app).
+            if (pathname.startsWith('/v1/admin/meta/facebook') && auth.role !== 'admin') {
+                return sendError(res, 403, 'FORBIDDEN', 'Acceso denegado: requiere rol de administrador.', requestId);
+            }
+            if (method === 'POST' && pathname === '/v1/admin/meta/facebook/connect') {
+                return sendJson(res, 200, await socialService.beginFacebookOAuth(), requestId);
+            }
+            if (method === 'GET' && pathname === '/v1/admin/meta/facebook/pages') {
+                return sendJson(res, 200, { pages: await socialService.listFacebookPages() }, requestId);
+            }
+            if (method === 'POST' && pathname === '/v1/admin/meta/facebook/pages/select') {
+                const body = JSON.parse((await readBody(req)) || '{}');
+                return sendJson(res, 200, await socialService.selectFacebookPage(body.pageId), requestId);
+            }
+            if (method === 'DELETE' && pathname === '/v1/admin/meta/facebook') {
+                return sendJson(res, 200, await socialService.disconnectFacebook(), requestId);
             }
 
             // 16.1 POST /v1/admin/social-drafts/:id/publish-instagram
@@ -540,30 +638,33 @@ export function createServer() {
                     if (waMsg.type === 'image' && waMsg.image?.id) {
                         imageUrls.push(`https://meta-media-proxy.angibell.pe/${waMsg.image.id}`);
                     }
-                } 
+                }
                 else return sendJson(res, 200, { received: true, status: 'ignored' }, requestId);
 
                 // Identificar rol: ¿Es el teléfono de la administradora?
-                const isAdmin = Boolean(db.queryOne(`SELECT phone FROM authorized_admins WHERE phone = ? AND active = 1`, [from]));
+                const isAdmin = Boolean(await db.queryOne(`SELECT phone FROM authorized_admins WHERE phone = $1 AND active = 1`, [from]));
                 const role = isAdmin ? 'admin' : 'customer';
 
                 // Buscar o registrar actor
-                let actor = db.queryOne(`SELECT id, role FROM actors WHERE phone = ?`, [from]);
+                let actor = await db.queryOne(`SELECT id, role FROM actors WHERE phone = $1`, [from]);
                 const nowIso = new Date().toISOString();
                 if (!actor) {
                     const actorId = crypto.randomUUID();
-                    db.execute(`INSERT INTO actors (id, role, phone, created_at) VALUES (?, ?, ?, ?)`, [actorId, role, from, nowIso]);
+                    await db.execute(`INSERT INTO actors (id, role, phone, created_at) VALUES ($1, $2, $3, $4)`, [actorId, role, from, nowIso]);
                     if (isAdmin) {
-                        db.execute(`INSERT OR IGNORE INTO authorized_admins (actor_id, phone, active) VALUES (?, ?, 1)`, [actorId, from]);
+                        await db.execute(
+                            `INSERT INTO authorized_admins (actor_id, phone, active) VALUES ($1, $2, 1) ON CONFLICT (phone) DO NOTHING`,
+                            [actorId, from]
+                        );
                     }
                     actor = { id: actorId, role };
                 }
 
                 // Buscar o crear conversación de WhatsApp
-                let conv = db.queryOne(`SELECT id FROM conversations WHERE actor_id = ? AND channel = 'whatsapp'`, [actor.id]);
+                let conv = await db.queryOne(`SELECT id FROM conversations WHERE actor_id = $1 AND channel = 'whatsapp'`, [actor.id]);
                 if (!conv) {
                     const convId = crypto.randomUUID();
-                    db.execute(`INSERT INTO conversations (id, actor_id, channel, created_at) VALUES (?, ?, 'whatsapp', ?)`, [convId, actor.id, nowIso]);
+                    await db.execute(`INSERT INTO conversations (id, actor_id, channel, created_at) VALUES ($1, $2, 'whatsapp', $3)`, [convId, actor.id, nowIso]);
                     conv = { id: convId };
                 }
 
@@ -589,7 +690,7 @@ export function createServer() {
             if (method === 'POST' && pathname === '/v1/webhooks/culqi') {
                 const bodyRaw = await readBody(req);
                 const payload = JSON.parse(bodyRaw || '{}');
-                const outcome = paymentService.processCulqiWebhook(payload);
+                const outcome = await paymentService.processCulqiWebhook(payload);
                 return sendJson(res, 202, outcome, requestId);
             }
 
@@ -600,6 +701,9 @@ export function createServer() {
             const msg = err.message || String(err);
             if (msg.startsWith('INVALID_INPUT:')) {
                 return sendError(res, 400, 'INVALID_INPUT', msg.replace('INVALID_INPUT:', '').trim(), requestId);
+            }
+            if (msg.startsWith('FORBIDDEN:')) {
+                return sendError(res, 403, 'FORBIDDEN', msg.replace('FORBIDDEN:', '').trim(), requestId);
             }
             if (msg.startsWith('NOT_FOUND:')) {
                 return sendError(res, 404, 'NOT_FOUND', msg.replace('NOT_FOUND:', '').trim(), requestId);

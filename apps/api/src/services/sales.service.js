@@ -4,7 +4,7 @@ import { orderService } from './order.service.js';
 import { paymentService } from './payment.service.js';
 
 export class SalesService {
-  createRequest(input, actorId, conversationId = null) {
+  async createRequest(input, actorId, conversationId = null) {
     const items = input.items;
     if (!Array.isArray(items) || items.length < 1 || items.length > 20) {
       throw new Error('INVALID_INPUT: Selecciona entre 1 y 20 prendas.');
@@ -28,9 +28,12 @@ export class SalesService {
         throw new Error('INVALID_INPUT: Variante o cantidad inválida.');
       }
       seen.add(item.variantId);
-      const variant = db.queryOne(`SELECT v.id, v.sku, v.price_cents, v.stock_on_hand, v.stock_reserved, p.name
-        FROM variants v JOIN products p ON p.id = v.product_id
-        WHERE v.id = ? AND p.status = 'published'`, [item.variantId]);
+      const variant = await db.queryOne(
+        `SELECT v.id, v.sku, v.price_cents, v.stock_on_hand, v.stock_reserved, p.name
+         FROM variants v JOIN products p ON p.id = v.product_id
+         WHERE v.id = $1 AND p.status = 'published'`,
+        [item.variantId]
+      );
       if (!variant) throw new Error('NOT_FOUND: Prenda no disponible en catálogo.');
       if (variant.stock_on_hand - variant.stock_reserved < quantity) {
         throw new Error(`OUT_OF_STOCK: Stock insuficiente para ${variant.sku}.`);
@@ -40,39 +43,66 @@ export class SalesService {
     }
     const id = crypto.randomUUID();
     const now = new Date().toISOString();
-    db.execute(`INSERT INTO sales_requests
-      (id, actor_id, conversation_id, items_json, subtotal_cents, delivery_method, delivery_zone, delivery_address, requested_date, status, created_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)`,
-      [id, actorId, conversationId, JSON.stringify(checked), subtotalCents, method, zone, address, requestedDate, now]);
-    return { id, status: 'pending', items: checked, subtotalCents, deliveryMethod: method, deliveryZone: zone,
-      requestedDate, shippingStatus: 'pending_validation', deliveryDateStatus: 'pending_validation' };
+    await db.execute(
+      `INSERT INTO actors (id, role, created_at) VALUES ($1, 'customer', $2) ON CONFLICT (id) DO NOTHING`,
+      [actorId, now]
+    );
+    await db.execute(
+      `INSERT INTO sales_requests
+       (id, actor_id, conversation_id, items_json, subtotal_cents, delivery_method, delivery_zone, delivery_address, requested_date, status, created_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'pending', $10)`,
+      [id, actorId, conversationId, JSON.stringify(checked), subtotalCents, method, zone, address, requestedDate, now]
+    );
+    return {
+      id,
+      status: 'pending',
+      items: checked,
+      subtotalCents,
+      deliveryMethod: method,
+      deliveryZone: zone,
+      requestedDate,
+      shippingStatus: 'pending_validation',
+      deliveryDateStatus: 'pending_validation'
+    };
   }
 
-  listPending(limit = 20) {
-    return db.query(`SELECT s.*, a.phone AS customer_phone FROM sales_requests s
-      JOIN actors a ON a.id = s.actor_id WHERE s.status = 'pending' ORDER BY s.created_at ASC LIMIT ?`,
-      [Math.min(Math.max(Number(limit) || 20, 1), 50)]).map(row => ({
-        id: row.id, customerPhone: row.customer_phone, items: JSON.parse(row.items_json),
-        subtotalCents: row.subtotal_cents, deliveryMethod: row.delivery_method,
-        deliveryZone: row.delivery_zone, deliveryAddress: row.delivery_address,
-        requestedDate: row.requested_date, createdAt: row.created_at
-      }));
+  async listPending(limit = 20) {
+    const rows = await db.query(
+      `SELECT s.*, a.phone AS customer_phone FROM sales_requests s
+       JOIN actors a ON a.id = s.actor_id WHERE s.status = 'pending' ORDER BY s.created_at ASC LIMIT $1`,
+      [Math.min(Math.max(Number(limit) || 20, 1), 50)]
+    );
+    return rows.map(row => ({
+      id: row.id,
+      customerPhone: row.customer_phone,
+      items: JSON.parse(row.items_json),
+      subtotalCents: row.subtotal_cents,
+      deliveryMethod: row.delivery_method,
+      deliveryZone: row.delivery_zone,
+      deliveryAddress: row.delivery_address,
+      requestedDate: row.requested_date,
+      createdAt: row.created_at
+    }));
   }
 
-  approveRequest(id, adminActorId, approval, requestId = crypto.randomUUID()) {
+  async approveRequest(id, adminActorId, approval, requestId = crypto.randomUUID()) {
     const shippingCents = Number(approval.shippingCents);
     const deliveryDate = String(approval.deliveryDate || '').trim();
     const parsedDate = new Date(`${deliveryDate}T12:00:00Z`);
-    const todayLima = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Lima',
-      year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date());
+    const todayLima = new Intl.DateTimeFormat('en-CA', {
+      timeZone: 'America/Lima',
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit'
+    }).format(new Date());
     if (!Number.isSafeInteger(shippingCents) || shippingCents < 0 || !/^\d{4}-\d{2}-\d{2}$/.test(deliveryDate) ||
         !Number.isFinite(parsedDate.getTime()) || parsedDate.toISOString().slice(0, 10) !== deliveryDate ||
         deliveryDate < todayLima) {
       throw new Error('INVALID_INPUT: Confirma costo de envío en céntimos y fecha futura YYYY-MM-DD.');
     }
-    const admin = db.queryOne(`SELECT id FROM actors WHERE id = ? AND role = 'admin'`, [adminActorId]);
+    const admin = await db.queryOne(`SELECT id FROM actors WHERE id = $1 AND role = 'admin'`, [adminActorId]);
     if (!admin) throw new Error('FORBIDDEN: Solo la administradora puede aprobar ventas.');
-    const request = db.queryOne(`SELECT * FROM sales_requests WHERE id = ?`, [id]);
+    const request = await db.queryOne(`SELECT * FROM sales_requests WHERE id = $1`, [id]);
     if (!request) throw new Error('NOT_FOUND: Solicitud de venta no encontrada.');
     if (request.status !== 'pending') throw new Error('CONFLICT: Solicitud ya revisada.');
     if (request.delivery_method === 'pickup' && shippingCents !== 0) {
@@ -80,56 +110,76 @@ export class SalesService {
     }
     const requestedItems = JSON.parse(request.items_json);
     for (const item of requestedItems) {
-      const current = db.queryOne(`SELECT price_cents FROM variants WHERE id = ?`, [item.variantId]);
+      const current = await db.queryOne(`SELECT price_cents FROM variants WHERE id = $1`, [item.variantId]);
       if (!current || current.price_cents !== item.priceCents) {
         throw new Error('CONFLICT: Cambió el precio del catálogo. Prepara una nueva solicitud para validación.');
       }
     }
-    return db.transaction(() => {
-      const currentRequest = db.queryOne(`SELECT * FROM sales_requests WHERE id = ? AND status = 'pending'`, [id]);
+    return db.transaction(async () => {
+      const currentRequest = await db.queryOne(
+        `SELECT * FROM sales_requests WHERE id = $1 AND status = 'pending' FOR UPDATE`,
+        [id]
+      );
       if (!currentRequest) throw new Error('CONFLICT: Solicitud ya revisada.');
       const currentItems = JSON.parse(currentRequest.items_json);
       for (const item of currentItems) {
-        const current = db.queryOne(`SELECT price_cents FROM variants WHERE id = ?`, [item.variantId]);
+        const current = await db.queryOne(`SELECT price_cents FROM variants WHERE id = $1`, [item.variantId]);
         if (!current || current.price_cents !== item.priceCents) {
           throw new Error('CONFLICT: Cambió el precio del catálogo. Prepara una nueva solicitud para validación.');
         }
       }
       const items = currentItems.map(({ variantId, quantity }) => ({ variantId, quantity }));
-      const order = orderService.createOrder({
+      const order = await orderService.createOrder({
         items,
         channel: currentRequest.conversation_id ? 'whatsapp' : 'web',
         deliveryZoneId: currentRequest.delivery_method === 'pickup' ? 'pickup' : currentRequest.delivery_zone,
         shippingCents,
       }, currentRequest.actor_id, { withinTransaction: true });
-      const payment = paymentService.createPayment(order.id, currentRequest.actor_id, 'simulated', { withinTransaction: true });
+      const payment = await paymentService.createPayment(order.id, currentRequest.actor_id, 'simulated', { withinTransaction: true });
       const now = new Date().toISOString();
-      const updated = db.execute(`UPDATE sales_requests SET status = 'approved', approved_date = ?, shipping_cents = ?, order_id = ?, reviewed_at = ?
-        WHERE id = ? AND status = 'pending'`, [deliveryDate, shippingCents, order.id, now, id]);
+      const updated = await db.execute(
+        `UPDATE sales_requests SET status = 'approved', approved_date = $1, shipping_cents = $2, order_id = $3, reviewed_at = $4
+         WHERE id = $5 AND status = 'pending'`,
+        [deliveryDate, shippingCents, order.id, now, id]
+      );
       if (updated.changes !== 1) throw new Error('CONFLICT: Solicitud ya revisada.');
-      db.execute(`INSERT INTO audit_events (id, actor_id, action, entity_id, request_id, changes, created_at)
-        VALUES (?, ?, 'approve_sale', ?, ?, ?, ?)`,
-        [crypto.randomUUID(), adminActorId, id, requestId, JSON.stringify({ orderId: order.id, deliveryDate, shippingCents }), now]);
-      return { id, status: 'approved', orderId: order.id, totalCents: order.total.amountCents,
-        deliveryDate, shippingCents, checkoutUrl: payment.checkoutUrl };
+      await db.execute(
+        `INSERT INTO audit_events (id, actor_id, action, entity_id, request_id, changes, created_at)
+         VALUES ($1, $2, 'approve_sale', $3, $4, $5, $6)`,
+        [crypto.randomUUID(), adminActorId, id, requestId, JSON.stringify({ orderId: order.id, deliveryDate, shippingCents }), now]
+      );
+      return {
+        id,
+        status: 'approved',
+        orderId: order.id,
+        totalCents: order.total.amountCents,
+        deliveryDate,
+        shippingCents,
+        checkoutUrl: payment.checkoutUrl
+      };
     });
   }
 
-  rejectRequest(id, adminActorId, reason, requestId = crypto.randomUUID()) {
-    const admin = db.queryOne(`SELECT id FROM actors WHERE id = ? AND role = 'admin'`, [adminActorId]);
+  async rejectRequest(id, adminActorId, reason, requestId = crypto.randomUUID()) {
+    const admin = await db.queryOne(`SELECT id FROM actors WHERE id = $1 AND role = 'admin'`, [adminActorId]);
     if (!admin) throw new Error('FORBIDDEN: Solo la administradora puede rechazar ventas.');
     const reviewedReason = String(reason || '').trim().slice(0, 300);
     if (!reviewedReason) throw new Error('INVALID_INPUT: Indica el motivo del rechazo.');
-    return db.transaction(() => {
-      const request = db.queryOne(`SELECT id, status FROM sales_requests WHERE id = ?`, [id]);
+    return db.transaction(async () => {
+      const request = await db.queryOne(`SELECT id, status FROM sales_requests WHERE id = $1 FOR UPDATE`, [id]);
       if (!request) throw new Error('NOT_FOUND: Solicitud de venta no encontrada.');
       if (request.status !== 'pending') throw new Error('CONFLICT: Solicitud ya revisada.');
       const now = new Date().toISOString();
-      const updated = db.execute(`UPDATE sales_requests SET status = 'rejected', reviewed_at = ? WHERE id = ? AND status = 'pending'`, [now, id]);
+      const updated = await db.execute(
+        `UPDATE sales_requests SET status = 'rejected', reviewed_at = $1 WHERE id = $2 AND status = 'pending'`,
+        [now, id]
+      );
       if (updated.changes !== 1) throw new Error('CONFLICT: Solicitud ya revisada.');
-      db.execute(`INSERT INTO audit_events (id, actor_id, action, entity_id, request_id, changes, created_at)
-        VALUES (?, ?, 'reject_sale', ?, ?, ?, ?)`,
-        [crypto.randomUUID(), adminActorId, id, requestId, JSON.stringify({ reason: reviewedReason }), now]);
+      await db.execute(
+        `INSERT INTO audit_events (id, actor_id, action, entity_id, request_id, changes, created_at)
+         VALUES ($1, $2, 'reject_sale', $3, $4, $5, $6)`,
+        [crypto.randomUUID(), adminActorId, id, requestId, JSON.stringify({ reason: reviewedReason }), now]
+      );
       return { id, status: 'rejected', reason: reviewedReason };
     });
   }
@@ -151,12 +201,18 @@ export class SalesService {
     if (process.env.WHATSAPP_BRIDGE_ENABLED !== 'true') {
       return { sent: false, reason: 'whatsapp_bridge_disabled' };
     }
-    const row = db.queryOne(`SELECT s.*, a.phone FROM sales_requests s JOIN actors a ON a.id = s.actor_id WHERE s.id = ?`, [id]);
+    const row = await db.queryOne(
+      `SELECT s.*, a.phone FROM sales_requests s JOIN actors a ON a.id = s.actor_id WHERE s.id = $1`,
+      [id]
+    );
     if (!row || row.status !== 'approved' || row.notification_sent_at || !row.phone) return { sent: false };
     const { wppConnectService } = await import('./wppconnect.service.js');
     const totalCents = row.subtotal_cents + row.shipping_cents;
     const baseUrl = String(process.env.PUBLIC_BASE_URL || '').replace(/\/$/, '');
-    const payment = db.queryOne(`SELECT checkout_url FROM payments WHERE order_id = ? ORDER BY created_at DESC LIMIT 1`, [row.order_id]);
+    const payment = await db.queryOne(
+      `SELECT checkout_url FROM payments WHERE order_id = $1 ORDER BY created_at DESC LIMIT 1`,
+      [row.order_id]
+    );
     const checkoutLink = baseUrl && payment?.checkout_url ? `${baseUrl}${payment.checkout_url}` : '';
     const message = `✅ Tu solicitud ${id} fue aprobada.\nFecha confirmada: ${row.approved_date}.\n` +
       `Delivery/recojo: ${row.delivery_method === 'delivery' ? row.delivery_zone : 'recojo'}.\n` +
@@ -164,8 +220,10 @@ export class SalesService {
       (checkoutLink ? `Enlace de pago de prueba: ${checkoutLink}` : 'Te enviaremos el enlace de pago por separado.');
     const result = await wppConnectService.sendMessage(row.phone, message);
     if (result?.error) return { sent: false, error: result.error };
-    db.execute(`UPDATE sales_requests SET notification_sent_at = ? WHERE id = ? AND notification_sent_at IS NULL`,
-      [new Date().toISOString(), id]);
+    await db.execute(
+      `UPDATE sales_requests SET notification_sent_at = $1 WHERE id = $2 AND notification_sent_at IS NULL`,
+      [new Date().toISOString(), id]
+    );
     return { sent: true };
   }
 }

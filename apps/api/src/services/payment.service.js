@@ -1,18 +1,24 @@
 import crypto from 'node:crypto';
 import { db } from '../database/db.js';
 import { orderService } from './order.service.js';
+
 export class PaymentService {
-    createPayment(orderId, actorId, mode = 'simulated', options = {}) {
+    async createPayment(orderId, actorId, mode = 'simulated', options = {}) {
         // Sweep any expired reservations first
-        if (!options.withinTransaction) orderService.sweepExpiredReservations();
-        const order = db.queryOne(`SELECT * FROM orders WHERE id = ? AND actor_id = ?`, [orderId, actorId]);
+        if (!options.withinTransaction) {
+            await orderService.sweepExpiredReservations();
+        }
+        const order = await db.queryOne(`SELECT * FROM orders WHERE id = $1 AND actor_id = $2`, [orderId, actorId]);
         if (!order) {
             throw new Error('NOT_FOUND: Pedido no encontrado.');
         }
         if (order.status !== 'pending_payment') {
             throw new Error(`CONFLICT: El pedido no admite pago (estado actual: ${order.status}).`);
         }
-        const existingPayment = db.queryOne(`SELECT * FROM payments WHERE order_id = ? AND status = 'pending' ORDER BY created_at DESC LIMIT 1`, [orderId]);
+        const existingPayment = await db.queryOne(
+            `SELECT * FROM payments WHERE order_id = $1 AND status = 'pending' ORDER BY created_at DESC LIMIT 1`,
+            [orderId]
+        );
         if (existingPayment) {
             return {
                 id: existingPayment.id,
@@ -28,8 +34,11 @@ export class PaymentService {
         const providerRef = `culqi_sim_${crypto.randomUUID().slice(0, 12)}`;
         const checkoutUrl = `/checkout/${mode}?paymentId=${paymentId}&orderId=${orderId}&amount=${order.total_cents}`;
         const nowIso = new Date().toISOString();
-        db.execute(`INSERT INTO payments (id, order_id, status, mode, amount_cents, provider_reference, checkout_url, expires_at, created_at)
-       VALUES (?, ?, 'pending', ?, ?, ?, ?, ?, ?)`, [paymentId, orderId, mode, order.total_cents, providerRef, checkoutUrl, order.reservation_expires_at, nowIso]);
+        await db.execute(
+            `INSERT INTO payments (id, order_id, status, mode, amount_cents, provider_reference, checkout_url, expires_at, created_at)
+             VALUES ($1, $2, 'pending', $3, $4, $5, $6, $7, $8)`,
+            [paymentId, orderId, mode, order.total_cents, providerRef, checkoutUrl, order.reservation_expires_at, nowIso]
+        );
         return {
             id: paymentId,
             orderId,
@@ -40,8 +49,12 @@ export class PaymentService {
             expiresAt: order.reservation_expires_at,
         };
     }
-    getPaymentByOrderId(orderId) {
-        const p = db.queryOne(`SELECT * FROM payments WHERE order_id = ? ORDER BY created_at DESC LIMIT 1`, [orderId]);
+
+    async getPaymentByOrderId(orderId) {
+        const p = await db.queryOne(
+            `SELECT * FROM payments WHERE order_id = $1 ORDER BY created_at DESC LIMIT 1`,
+            [orderId]
+        );
         if (!p)
             return null;
         return {
@@ -54,22 +67,30 @@ export class PaymentService {
             expiresAt: p.expires_at,
         };
     }
-    processCulqiWebhook(payload) {
+
+    async processCulqiWebhook(payload) {
         const eventId = payload.id || payload.eventId || crypto.createHash('sha256').update(JSON.stringify(payload)).digest('hex').slice(0, 16);
         const payloadHash = crypto.createHash('sha256').update(JSON.stringify(payload)).digest('hex');
-        return db.transaction(() => {
+        return db.transaction(async () => {
             // Check webhook deduplication
-            const existing = db.queryOne(`SELECT * FROM webhook_inbox WHERE provider = 'culqi' AND event_id = ?`, [eventId]);
+            const existing = await db.queryOne(
+                `SELECT * FROM webhook_inbox WHERE provider = 'culqi' AND event_id = $1`,
+                [eventId]
+            );
             if (existing) {
                 return { received: true, status: 'already_processed' };
             }
-            db.execute(`INSERT INTO webhook_inbox (provider, mode, event_id, payload_hash, status, created_at)
-         VALUES ('culqi', 'simulated', ?, ?, 'processed', ?)`, [eventId, payloadHash, new Date().toISOString()]);
-            const orderId = payload.orderId || payload.data?.orderId || payload.metadata?.orderId;
+            await db.execute(
+                `INSERT INTO webhook_inbox (provider, mode, event_id, payload_hash, status, created_at)
+                 VALUES ('culqi', 'simulated', $1, $2, 'processed', $3)
+                 ON CONFLICT (provider, mode, event_id) DO NOTHING`,
+                [eventId, payloadHash, new Date().toISOString()]
+            );
+            const orderId = payload.orderId || payload.data?.orderId || payload.data?.order_id || payload.data?.metadata?.orderId || payload.metadata?.orderId;
             if (!orderId) {
                 return { received: true, status: 'ignored_no_order' };
             }
-            const order = db.queryOne(`SELECT * FROM orders WHERE id = ?`, [orderId]);
+            const order = await db.queryOne(`SELECT * FROM orders WHERE id = $1 FOR UPDATE`, [orderId]);
             if (!order) {
                 return { received: true, status: 'order_not_found' };
             }
@@ -81,24 +102,34 @@ export class PaymentService {
             if (new Date(order.reservation_expires_at) < now || order.status === 'expired') {
                 // Late payment after expiration: record incident for human reconciliation, DO NOT mark paid or decrease stock
                 const auditId = crypto.randomUUID();
-                db.execute(`INSERT INTO audit_events (id, actor_id, action, entity_id, proposal_id, request_id, changes, created_at)
-           VALUES (?, ?, 'late_payment_reconciliation_required', ?, NULL, ?, ?, ?)`, [auditId, order.actor_id, order.id, crypto.randomUUID(), JSON.stringify({ paidAmount, expiredAt: order.reservation_expires_at }), now.toISOString()]);
+                await db.execute(
+                    `INSERT INTO audit_events (id, actor_id, action, entity_id, proposal_id, request_id, changes, created_at)
+                     VALUES ($1, $2, 'late_payment_reconciliation_required', $3, NULL, $4, $5, $6)`,
+                    [auditId, order.actor_id, order.id, crypto.randomUUID(), JSON.stringify({ paidAmount, expiredAt: order.reservation_expires_at }), now.toISOString()]
+                );
                 return { received: true, status: 'late_payment_reconciliation_required' };
             }
             // Valid payment before expiration: consume reservations and deduct stock
-            const reservations = db.query(`SELECT * FROM reservations WHERE order_id = ? AND status = 'active'`, [order.id]);
+            const reservations = await db.query(
+                `SELECT * FROM reservations WHERE order_id = $1 AND status = 'active' FOR UPDATE`,
+                [order.id]
+            );
             for (const res of reservations) {
-                db.execute(`UPDATE variants
-           SET stock_on_hand = MAX(0, stock_on_hand - ?),
-               stock_reserved = MAX(0, stock_reserved - ?),
-               version = version + 1
-           WHERE id = ?`, [res.quantity, res.quantity, res.variant_id]);
-                db.execute(`UPDATE reservations SET status = 'consumed' WHERE id = ?`, [res.id]);
+                await db.execute(
+                    `UPDATE variants
+                     SET stock_on_hand = GREATEST(0, stock_on_hand - $1),
+                         stock_reserved = GREATEST(0, stock_reserved - $2),
+                         version = version + 1
+                     WHERE id = $3`,
+                    [res.quantity, res.quantity, res.variant_id]
+                );
+                await db.execute(`UPDATE reservations SET status = 'consumed' WHERE id = $1`, [res.id]);
             }
-            db.execute(`UPDATE orders SET status = 'paid' WHERE id = ?`, [order.id]);
-            db.execute(`UPDATE payments SET status = 'succeeded' WHERE order_id = ? AND status = 'pending'`, [order.id]);
+            await db.execute(`UPDATE orders SET status = 'paid' WHERE id = $1`, [order.id]);
+            await db.execute(`UPDATE payments SET status = 'succeeded' WHERE order_id = $1 AND status = 'pending'`, [order.id]);
             return { received: true, status: 'order_paid_and_stock_deducted' };
         });
     }
 }
+
 export const paymentService = new PaymentService();
