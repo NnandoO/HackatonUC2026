@@ -27,6 +27,9 @@ import { Aprobaciones, type Pendiente } from "./aprobaciones";
 import { AlmacenManual, type PiezaAlmacen } from "./almacen-manual";
 import { LogoutButton } from "./logout-button";
 import { PanelLogin } from "./panel-login";
+import { VentasPendientes, type VentaPendiente } from "./ventas-pendientes";
+import { coreApiFetch } from "@/lib/core-api";
+import { BorradoresMeta, type BorradorMeta, type ConexionesMeta } from "./borradores-meta";
 
 export const dynamic = "force-dynamic";
 
@@ -35,7 +38,7 @@ export const metadata: Metadata = {
 };
 
 function fechaHora(iso: string): string {
-  const fecha = new Date(`${iso.replace(" ", "T")}Z`);
+  const fecha = new Date(iso.includes("T") ? iso : `${iso.replace(" ", "T")}Z`);
   if (Number.isNaN(fecha.getTime())) return iso;
   return new Intl.DateTimeFormat("es-PE", {
     day: "2-digit",
@@ -59,7 +62,11 @@ export default async function PanelPage() {
     );
   }
 
-  const todos = listProducts({ limit: 200 }).map(toPublicProduct);
+  const [productosRaw, registro] = await Promise.all([
+    listProducts({ limit: 200 }),
+    listPublications(20),
+  ]);
+  const todos = productosRaw.map(toPublicProduct);
   const pendientes: Pendiente[] = todos
     .filter((p) => p.status === "pendiente")
     .map((p) => ({
@@ -72,12 +79,35 @@ export default async function PanelPage() {
         "sin tallas",
       descripcion: p.description,
     }));
-  const registro = listPublications(20);
   const enAprobacion = todos.filter((p) => p.status === "pendiente").length;
   const publicados = todos.filter((p) => p.status === "publicado").length;
+  let ventasPendientes: VentaPendiente[] = [];
+  let errorVentas: string | null = null;
+  try {
+    const response = await coreApiFetch("/v1/admin/sales-requests?limit=50", { admin: true });
+    const result = await response.json() as { items?: VentaPendiente[]; error?: { message?: string } };
+    if (!response.ok) throw new Error(result.error?.message || `API respondió ${response.status}`);
+    ventasPendientes = result.items ?? [];
+  } catch (error) {
+    errorVentas = error instanceof Error ? error.message : "API comercial no disponible";
+  }
+  let borradoresMeta: BorradorMeta[] = [];
+  let conexionesMeta: ConexionesMeta | null = null;
+  let errorMeta: string | null = null;
+  try {
+    const response = await coreApiFetch("/v1/admin/social-drafts?limit=50", { admin: true });
+    const result = await response.json() as { items?: BorradorMeta[]; connections?: ConexionesMeta; error?: { message?: string } };
+    if (!response.ok) throw new Error(result.error?.message || `API respondió ${response.status}`);
+    borradoresMeta = result.items ?? [];
+    conexionesMeta = result.connections ?? null;
+  } catch (error) {
+    errorMeta = error instanceof Error ? error.message : "API comercial no disponible";
+  }
 
   const secciones = [
+    { href: "#ventas", nombre: "Ventas por validar", n: ventasPendientes.length },
     { href: "#por-aprobar", nombre: "Por aprobar", n: enAprobacion },
+    { href: "#meta", nombre: "Meta por revisar", n: borradoresMeta.length },
     { href: "#catalogo", nombre: "Catálogo", n: todos.length },
     { href: "#almacen", nombre: "Almacén", n: publicados },
     { href: "#registro", nombre: "Registro", n: registro.length },
@@ -150,6 +180,25 @@ export default async function PanelPage() {
         </nav>
 
         <div className="mt-10 space-y-10">
+          <section id="ventas" className="scroll-mt-8">
+            <Card className="border-[1.5px] border-tinta bg-card shadow-papel">
+              <CardHeader>
+                <CardTitle className="flex flex-wrap items-center gap-3 font-display text-[26px]">
+                  Ventas por validar
+                  <Badge className="rotulo border-[1.5px] border-tinta bg-tiza text-[10px] text-tinta">
+                    {ventasPendientes.length} pendientes
+                  </Badge>
+                </CardTitle>
+                <CardDescription>
+                  Confirma personalmente stock, fecha y costo de envío. El pago de prueba solo se prepara después de tu aprobación.
+                </CardDescription>
+              </CardHeader>
+              <CardContent>
+                <VentasPendientes ventas={ventasPendientes} error={errorVentas} />
+              </CardContent>
+            </Card>
+          </section>
+
           <section id="por-aprobar" className="scroll-mt-8">
             <Card className="border-[1.5px] border-tinta bg-card shadow-papel">
               <CardHeader>
@@ -160,13 +209,31 @@ export default async function PanelPage() {
                   </Badge>
                 </CardTitle>
                 <CardDescription>
-                  Publicaciones que Paperclip dejó esperando tu revisión.
-                  Aprobar publica la pieza en el catálogo; rechazar la deja
-                  fuera.
+                  Publicaciones esperando tu revisión. Aprobar publica la pieza en el catálogo;
+                  rechazar la deja fuera.
                 </CardDescription>
               </CardHeader>
               <CardContent>
                 <Aprobaciones pendientes={pendientes} />
+              </CardContent>
+            </Card>
+          </section>
+
+          <section id="meta" className="scroll-mt-8">
+            <Card className="border-[1.5px] border-tinta bg-card shadow-papel">
+              <CardHeader>
+                <CardTitle className="flex flex-wrap items-center gap-3 font-display text-[26px]">
+                  Publicaciones para revisar
+                  <Badge className="rotulo border-[1.5px] border-tinta bg-tiza text-[10px] text-tinta">
+                    {borradoresMeta.length} preparadas
+                  </Badge>
+                </CardTitle>
+                <CardDescription>
+                  Los borradores quedan listos para revisión. La publicación externa requiere habilitación explícita, credenciales y una imagen con URL HTTPS pública.
+                </CardDescription>
+              </CardHeader>
+              <CardContent>
+                <BorradoresMeta borradores={borradoresMeta} error={errorMeta} conexiones={conexionesMeta} />
               </CardContent>
             </Card>
           </section>
@@ -232,7 +299,7 @@ export default async function PanelPage() {
                             .join(" · ")}
                         </TableCell>
                         <TableCell className="rotulo text-[10px] text-tinta-suave">
-                          {p.status === "pendiente" ? "Paperclip" : "Taller"}
+                          {p.status === "pendiente" ? "Por aprobar" : "Taller"}
                         </TableCell>
                       </TableRow>
                     ))}
@@ -252,9 +319,8 @@ export default async function PanelPage() {
                   </Badge>
                 </CardTitle>
                 <CardDescription>
-                  El stock llega desde Paperclip al publicar cada pieza; aquí lo
-                  corriges con tus dedos cuando vendes o aparece ropa nueva.
-                  Cada cambio se refleja al instante en la tienda.
+                  Aquí corriges el stock con tus dedos cuando vendes o aparece ropa nueva.
+                  Cada cambio se refleja al instante en PostgreSQL, en la tienda y en el bot.
                 </CardDescription>
               </CardHeader>
               <CardContent>
@@ -306,7 +372,7 @@ export default async function PanelPage() {
                 </ul>
                 <Separator className="my-6" />
                 <p className="max-w-[70ch] text-[14px] leading-relaxed text-tinta-suave">
-                  Paperclip sube publicaciones a{" "}
+                  Las publicaciones entran a{" "}
                   <span className="num">POST /api/publications</span> con la
                   cabecera <span className="num">X-API-Key</span>. La página
                   nunca publica sola: esta lista es la auditoría de lo recibido.

@@ -4,7 +4,7 @@ import { useState } from "react";
 import { cn } from "@/lib/utils";
 import { waLink } from "@/lib/wa";
 
-type Variante = { size: string; stock: number; stockFuente: "erp" | "declarado" };
+type Variante = { size: string; stock: number; stockFuente?: "declarado" };
 
 export function TallaPicker({
   nombre,
@@ -18,7 +18,6 @@ export function TallaPicker({
   const primeraConStock = variantes.find((v) => v.stock > 0)?.size ?? null;
   const [talla, setTalla] = useState<string | null>(primeraConStock);
   const todoAgotado = primeraConStock === null;
-  const fuente = variantes[0]?.stockFuente ?? "declarado";
 
   const mensaje = talla
     ? `Hola, me interesa la pieza ${nombre} en talla ${talla} (${precio}) del catálogo de Angibell Creaciones.`
@@ -29,7 +28,7 @@ export function TallaPicker({
       <div className="flex flex-wrap items-baseline justify-between gap-2">
         <span className="rotulo text-[12px]">Elige tu talla</span>
         <span className="rotulo text-[10px] text-tinta-suave">
-          {fuente === "erp" ? "stock leído del almacén" : "stock ajustado a mano"}
+          stock en tiempo real
         </span>
       </div>
       <div className="mt-3 flex flex-wrap gap-2" role="group" aria-label="Tallas disponibles">

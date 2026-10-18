@@ -1,8 +1,10 @@
 import { requireApiKey } from "@/lib/auth";
-import { createProduct, listPublications, recordPublication, type VariantInput } from "@/lib/db";
-import { getErpnextConfig, syncProduct } from "@/lib/erpnext";
-import { approveProduct } from "@/lib/flow";
-import { toPublicProduct } from "@/lib/public";
+import {
+  createProduct,
+  listPublications,
+  recordPublication,
+  type VariantInput,
+} from "@/lib/db";
 
 export const dynamic = "force-dynamic";
 
@@ -17,15 +19,6 @@ function num(v: unknown): number | null {
 /**
  * POST /api/publications — Paperclip sube una publicación nueva.
  * Cabecera obligatoria: X-API-Key (o Authorization: Bearer <clave>).
- * Cuerpo JSON (acepta snake_case y camelCase):
- * {
- *   "name": "Vestido abril",
- *   "description": "...", "price_cents": 12000, "currency": "PEN",
- *   "category": "Vestidos", "colors": ["rosa"],
- *   "image_urls": ["https://... | /media/archivo.jpg"],
- *   "sizes": [{ "size": "4", "stock": 3 }, { "size": "6", "stock": 0 }],
- *   "publish": true
- * }
  */
 export async function POST(req: Request) {
   const denied = requireApiKey(req);
@@ -83,10 +76,11 @@ export async function POST(req: Request) {
   const imageUrls = Array.isArray(body.image_urls ?? body.imageUrls ?? body.imagenes)
     ? ((body.image_urls ?? body.imageUrls ?? body.imagenes) as unknown[]).map(String)
     : [];
+  const publish = body.publish === true || body.publicar === true;
 
   let product;
   try {
-    product = createProduct({
+    product = await createProduct({
       name,
       description: typeof body.description === "string" ? body.description : "",
       priceCents,
@@ -96,8 +90,9 @@ export async function POST(req: Request) {
       colors,
       imageUrls,
       variants,
-      status: "pendiente",
+      status: publish ? "publicado" : "pendiente",
       source: "paperclip",
+      publish,
     });
   } catch (e) {
     return Response.json(
@@ -105,9 +100,9 @@ export async function POST(req: Request) {
       { status: 400 }
     );
   }
-  recordPublication(product.id, body, `Publicación subida por Paperclip: ${product.name}`);
 
-  const publish = body.publish === true || body.publicar === true;
+  await recordPublication(product.id, body, `Publicación subida por Paperclip: ${product.name}`);
+
   if (!publish) {
     return Response.json(
       {
@@ -119,29 +114,13 @@ export async function POST(req: Request) {
       { status: 201 }
     );
   }
-  const outcome = await approveProduct(product.id);
-  if (outcome.sync === null) {
-    const cfg = await getErpnextConfig();
-    if (!cfg) {
-      return Response.json(
-        {
-          id: outcome.product.id,
-          slug: outcome.product.slug,
-          estado: "publicado",
-          almacen: { estado: "no_configurado" },
-          aviso: outcome.aviso,
-        },
-        { status: 201 }
-      );
-    }
-    const sync = await syncProduct(cfg, outcome.product);
-    return Response.json(
-      { id: outcome.product.id, slug: outcome.product.slug, estado: "publicado", almacen: sync },
-      { status: 201 }
-    );
-  }
+
   return Response.json(
-    { id: outcome.product.id, slug: outcome.product.slug, estado: "publicado", almacen: outcome.sync },
+    {
+      id: product.id,
+      slug: product.slug,
+      estado: "publicado",
+    },
     { status: 201 }
   );
 }
@@ -152,7 +131,5 @@ export async function POST(req: Request) {
 export async function GET(req: Request) {
   const denied = requireApiKey(req);
   if (denied) return denied;
-  return Response.json({ publicaciones: listPublications(50) });
+  return Response.json({ publicaciones: await listPublications(50) });
 }
-
-export { toPublicProduct };

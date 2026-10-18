@@ -1,6 +1,5 @@
 import Link from "next/link";
 import { listProducts } from "@/lib/db";
-import { getErpnextConfig, getErpnextState } from "@/lib/erpnext";
 import { formatPrecio, toPublicProduct } from "@/lib/public";
 import { MSG_CATALOGO, waLink } from "@/lib/wa";
 import { PiezaCard } from "@/components/tienda/pieza-card";
@@ -11,7 +10,7 @@ import { Alfiler, FotoPieza, Sello, TallaChips } from "@/components/tienda/pieza
 export const dynamic = "force-dynamic";
 
 function fechaCorta(iso: string): string {
-  const fecha = new Date(`${iso.replace(" ", "T")}Z`);
+  const fecha = new Date(iso.includes("T") ? iso : `${iso.replace(" ", "T")}Z`);
   if (Number.isNaN(fecha.getTime())) return "hoy";
   return new Intl.DateTimeFormat("es-PE", { day: "2-digit", month: "short", timeZone: "UTC" })
     .format(fecha)
@@ -20,7 +19,7 @@ function fechaCorta(iso: string): string {
 }
 
 export default async function Home() {
-  const productos = listProducts({ status: "publicado", limit: 200 }).map(toPublicProduct);
+  const productos = (await listProducts({ status: "publicado", limit: 200 })).map(toPublicProduct);
   const conFoto = productos.filter((p) => p.images.length > 0);
   const hero =
     conFoto.find((p) => p.slug === "vestido-rosas") ??
@@ -28,7 +27,6 @@ export default async function Home() {
     productos.find((p) => p.slug === "vestido-rosas") ??
     productos[0];
   const piezas = productos.filter((p) => p.slug !== hero?.slug).slice(0, 4);
-  const [erpCfg, erpEstado] = await Promise.all([getErpnextConfig(), getErpnextState()]);
 
   if (!hero) {
     return (
@@ -39,8 +37,8 @@ export default async function Home() {
             La mesa de corte está lista.
           </h1>
           <p className="mt-4 max-w-[48ch] text-[16px] leading-relaxed text-tinta-suave">
-            Aún no hay piezas publicadas. Cuando la propietaria apruebe la primera publicación de
-            Paperclip, aparecerá aquí.
+            Aún no hay piezas publicadas. Cuando la propietaria apruebe la primera publicación,
+            aparecerá aquí.
           </p>
           <Link href="/panel" className="bt-tiza rotulo mt-8 inline-block px-6 py-4 text-[12px]">
             Ir al panel de aprobaciones
@@ -52,6 +50,8 @@ export default async function Home() {
   }
 
   const precioHero = formatPrecio(hero.priceCents, hero.currency);
+  const primeraTalla =
+    hero.variants.find((v) => v.stock > 0)?.size ?? hero.variants[0]?.size ?? "Única";
   const [tituloA, ...tituloResto] = hero.name.split(" ");
   const tituloB = tituloResto.join(" ");
 
@@ -104,7 +104,7 @@ export default async function Home() {
               <Alfiler className="-right-2 -top-2" />
               <Alfiler className="-left-2 -bottom-2" />
               <div className="num absolute -left-3 bottom-8 rotate-[-4deg] border-[1.5px] border-tinta bg-papel px-3 py-2 text-[12px]">
-                Talla {hero.variants.find((v) => v.stock > 0)?.size ?? hero.variants[0]?.size ?? "Única"} · {precioHero}
+                Talla {primeraTalla} · {precioHero}
               </div>
             </div>
           </div>
@@ -153,9 +153,7 @@ export default async function Home() {
             </div>
             <div className="costura mt-2 w-full" />
             <p className="rotulo text-[10px] leading-relaxed text-tinta-suave">
-              {erpCfg
-                ? `Almacén conectado${erpEstado.company ? ` · ${erpEstado.company}` : ""}${erpEstado.warehouse ? ` · ${erpEstado.warehouse}` : ""}`
-                : "Stock ajustado a mano por Angibell; Paperclip lo actualiza al publicar."}
+              Catálogo sincronizado en PostgreSQL con el motor comercial y el asistente de WhatsApp.
             </p>
           </aside>
         </section>

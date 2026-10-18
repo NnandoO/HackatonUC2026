@@ -1,7 +1,5 @@
 import { requireApiKey } from "@/lib/auth";
 import { listProducts, setVariantDeclaredStock } from "@/lib/db";
-import { getErpnextConfig, getErpnextState, pingErpnext, refreshStockCache } from "@/lib/erpnext";
-import { syncPending } from "@/lib/flow";
 import { isPanelAuthenticated } from "@/lib/panel-auth";
 import { toPublicProduct } from "@/lib/public";
 
@@ -13,45 +11,17 @@ async function authorized(req: Request): Promise<boolean> {
 }
 
 /**
- * GET /api/stock — estado del almacén + stock por producto.
- * ?live=1 refresca el stock desde ERPNext antes de responder.
+ * GET /api/stock — stock actual por producto desde PostgreSQL.
  */
-export async function GET(req: Request) {
-  const url = new URL(req.url);
-  const cfg = await getErpnextConfig();
-  let almacen: { estado: "ok" | "no_configurado" | "inaccesible"; usuario?: string; url?: string } = {
-    estado: "no_configurado",
-  };
-  if (cfg) {
-    try {
-      const usuario = await pingErpnext(cfg);
-      almacen = { estado: "ok", usuario, url: cfg.url };
-      if (url.searchParams.get("live") === "1") {
-        await refreshStockCache(cfg);
-      }
-    } catch {
-      almacen = { estado: "inaccesible", url: cfg.url };
-    }
-  }
-  const productos = listProducts({ status: "publicado", limit: 500 }).map(toPublicProduct);
-  return Response.json({ almacen, ...(await getErpnextState()), productos });
-}
-
-/**
- * POST /api/stock — sincroniza variantes pendientes al almacén y refresca el stock.
- */
-export async function POST(req: Request) {
-  if (!(await authorized(req))) {
-    return Response.json({ error: "No autorizado" }, { status: 401 });
-  }
-  const { productos, resumen } = await syncPending();
-  return Response.json({ productos, almacen: resumen });
+export async function GET() {
+  const productos = (await listProducts({ status: "publicado", limit: 500 })).map(toPublicProduct);
+  return Response.json({ ok: true, motor: "postgresql", productos });
 }
 
 /**
  * PATCH /api/stock — ajuste manual del stock por variante (panel de la
  * propietaria con sesión, o Paperclip con API key).
- * Cuerpo: { "updates": [{ "variantId": 12, "stock": 4 }] }
+ * Cuerpo: { "updates": [{ "variantId": "uuid", "stock": 4 }] }
  */
 export async function PATCH(req: Request) {
   if (!(await authorized(req))) {
@@ -67,18 +37,33 @@ export async function PATCH(req: Request) {
       { status: 400 }
     );
   }
-  const lista: Array<{ variantId: number; stock: number }> = [];
+  const lista: Array<{ variantId: string; stock: number }> = [];
   for (const u of updates) {
-    const variantId = Number(u.variantId);
+    const variantId = typeof u.variantId === "string" || typeof u.variantId === "number"
+      ? String(u.variantId).trim()
+      : "";
     const stock = Number(u.stock);
-    if (!Number.isInteger(variantId) || variantId <= 0 || !Number.isInteger(stock) || stock < 0 || stock > 100000) {
+    if (!variantId || !Number.isInteger(stock) || stock < 0 || stock > 100000) {
       return Response.json(
-        { error: "Cada update necesita variantId y stock (enteros, stock ≥ 0)" },
+        { error: "Cada update necesita variantId (string no vacío) y stock (entero ≥ 0)" },
         { status: 400 }
       );
     }
     lista.push({ variantId, stock });
   }
-  for (const u of lista) setVariantDeclaredStock(u.variantId, u.stock);
+  try {
+    for (const u of lista) {
+      await setVariantDeclaredStock(u.variantId, u.stock);
+    }
+  } catch (error) {
+    return Response.json(
+      {
+        error: `No se pudo actualizar el stock en el motor comercial: ${
+          error instanceof Error ? error.message : "error desconocido"
+        }`,
+      },
+      { status: 502 }
+    );
+  }
   return Response.json({ ok: true, actualizadas: lista.length });
 }

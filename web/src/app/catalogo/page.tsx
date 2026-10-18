@@ -27,7 +27,7 @@ export default async function CatalogoPage({
   searchParams: Promise<{ talla?: string }>;
 }) {
   const { talla } = await searchParams;
-  const todos = listProducts({ status: "publicado", limit: 200 }).map(toPublicProduct);
+  const todos = (await listProducts({ status: "publicado", limit: 200 })).map(toPublicProduct);
   const tallas = Array.from(new Set(todos.flatMap((p) => p.variants.map((v) => v.size)))).sort(
     ordenarTallas
   );

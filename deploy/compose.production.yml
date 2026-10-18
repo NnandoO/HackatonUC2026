@@ -1,0 +1,148 @@
+name: angibell360
+
+# Production app stack. The Cloudflare connector is a separately managed
+# container on the external "angibell" network.
+services:
+  db:
+    image: postgres:17-alpine
+    container_name: angibell-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:?Set POSTGRES_DB in the deployment environment}
+      POSTGRES_USER: ${POSTGRES_USER:?Set POSTGRES_USER in the deployment environment}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in the deployment environment}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 10s
+    networks:
+      - angibell
+
+  api:
+    build:
+      context: ..
+      dockerfile: apps/api/Dockerfile
+    container_name: angibell-api
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      PORT: "4000"
+      HOST: 0.0.0.0
+      DATABASE_URL: ${DATABASE_URL:?Set DATABASE_URL for the PostgreSQL service}
+      MEDIA_DIR: /data/media
+      PUBLIC_BASE_URL: https://angibell.soryntel.com
+      PUBLIC_MEDIA_BASE_URL: https://angibell.soryntel.com
+      META_PANEL_RETURN_URL: https://angibell.soryntel.com/panel
+      WHATSAPP_BRIDGE_ENABLED: ${WHATSAPP_BRIDGE_ENABLED:-false}
+      WPPCONNECT_BASE_URL: http://angibell-wppconnect:21465
+      WPPCONNECT_SECRET_KEY: ${WPPCONNECT_SECRET_KEY:-}
+      PANEL_PASSWORD: ${PANEL_PASSWORD:?Set the panel password}
+      GROQ_API_KEY: ${GROQ_API_KEY:-}
+      ANGIBELL_ADMIN_SERVICE_KEY: ${ANGIBELL_ADMIN_SERVICE_KEY:?Set the internal web-to-API key}
+      META_PUBLISH_ENABLED: ${META_PUBLISH_ENABLED:-false}
+      META_APP_ID: ${META_APP_ID:-}
+      META_APP_SECRET: ${META_APP_SECRET:-}
+      META_OAUTH_REDIRECT_URI: https://angibell.soryntel.com/v1/admin/meta/facebook/oauth/callback
+      META_TOKEN_ENCRYPTION_KEY: ${META_TOKEN_ENCRYPTION_KEY:-}
+      META_GRAPH_API_VERSION: ${META_GRAPH_API_VERSION:-v26.0}
+      META_ACCESS_TOKEN_FILE: /run/secrets/meta-instagram-token
+      META_FACEBOOK_PAGE_TOKEN_FILE: /run/secrets/meta-facebook-page-token
+      META_FACEBOOK_PAGE_ID: ${META_FACEBOOK_PAGE_ID:-}
+      META_INSTAGRAM_USER_ID: ${META_INSTAGRAM_USER_ID:-}
+      SALES_ADMIN_PHONE: ${SALES_ADMIN_PHONE:?Set the authorized sales admin phone}
+    volumes:
+      - api-media:/data/media
+      - ./secrets:/run/secrets:ro
+    expose:
+      - "4000"
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:4000/v1/health').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
+    depends_on:
+      db:
+        condition: service_healthy
+    networks:
+      - angibell
+
+  wppconnect:
+    image: wppconnect/wppconnect-server:2.10.42
+    container_name: angibell-wppconnect
+    restart: unless-stopped
+    environment:
+      PORT: "21465"
+      SECRET_KEY: ${WPPCONNECT_SECRET_KEY:?Set a unique WPPConnect secret key}
+      TOKEN_STORE_TYPE: file
+      CUSTOM_USER_DATA_DIR: /usr/src/wpp-server/userDataDir/
+      MANAGER_ENABLED: "false"
+    volumes:
+      - wppconnect-tokens:/usr/src/wpp-server/tokens
+      - wppconnect-user-data:/usr/src/wpp-server/userDataDir
+      - wppconnect-uploads:/usr/src/wpp-server/uploads
+      - wppconnect-images:/usr/src/wpp-server/WhatsAppImages
+      - wppconnect-logs:/usr/src/wpp-server/log
+    expose:
+      - "21465"
+    mem_limit: 1200m
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://127.0.0.1:21465/healthz || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 45s
+    networks:
+      - angibell
+
+  web:
+    build:
+      context: ..
+      dockerfile: web/Dockerfile
+      args:
+        ANGIBELL_API_URL: http://api:4000
+    container_name: angibell-web
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      PORT: "3000"
+      HOSTNAME: 0.0.0.0
+      ANGIBELL_API_URL: http://api:4000
+      ANGIBELL_ADMIN_SERVICE_KEY: ${ANGIBELL_ADMIN_SERVICE_KEY:?Set the internal web-to-API key}
+      PANEL_PASSWORD: ${PANEL_PASSWORD:?Set the panel password}
+      DATA_DIR: /data
+    volumes:
+      - web-data:/data
+      - api-media:/data/uploads
+    expose:
+      - "3000"
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/api/health').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+      start_period: 20s
+    depends_on:
+      api:
+        condition: service_healthy
+    networks:
+      - angibell
+
+volumes:
+  postgres-data:
+  api-media:
+  web-data:
+  wppconnect-tokens:
+  wppconnect-user-data:
+  wppconnect-uploads:
+  wppconnect-images:
+  wppconnect-logs:
+
+networks:
+  angibell:
+    name: angibell
+    external: true

@@ -7,14 +7,14 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 
 export type PiezaAlmacen = {
-  id: number;
+  id: string;
   name: string;
-  variants: Array<{ id: number; size: string; stock: number }>;
+  variants: Array<{ id: string; size: string; stock: number }>;
 };
 
 export function AlmacenManual({ piezas }: { piezas: PiezaAlmacen[] }) {
   const router = useRouter();
-  const [guardando, setGuardando] = useState<number | null>(null);
+  const [guardando, setGuardando] = useState<string | null>(null);
 
   async function guardar(e: React.FormEvent<HTMLFormElement>, pieza: PiezaAlmacen) {
     e.preventDefault();

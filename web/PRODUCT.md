@@ -8,26 +8,26 @@ web
 
 ## Stack
 
-Delegado por el plan maestro (`PLAN-ANGIBELL360.md` v2): Next.js (App Router) + React + TypeScript + Tailwind para tienda y panel. Frappe/ERPNext v16 en Docker **solo para el control de almacén** (decisión explícita del usuario): la página nunca renderiza con tecnología Frappe; el ERP es el motor de inventario detrás de la API. SQLite local para catálogo y publicaciones; un solo Docker Compose levanta página + almacén.
+Implementación actual: Next.js + TypeScript para tienda/panel, PostgreSQL 17 como fuente única de datos y API comercial Node.js HTTP. La tienda consulta y actualiza el catálogo mediante la API; reservas, pedidos, publicaciones y aprobaciones usan la misma base transaccional. La API todavía no está implementada con NestJS y BullMQ no está integrado.
 
 ## Users
 
 - **Propietaria de Angibell Creaciones** (Huancayo, Perú): registra y publica prendas, aprueba publicaciones y controla el stock. Su centro de operación es WhatsApp; este panel es su respaldo web.
 - **Clientas**: madres, padres y familiares que compran ropa de niñas 0–14; navegan desde el celular.
-- **Jurado del hackathon** (demo del domingo) y equipo SORYNTEL: recorren catálogo → publicación entrante de Paperclip → aprobación → almacén.
+- **Jurado del hackathon** y equipo SORYNTEL: recorren catálogo → publicación entrante de Paperclip → aprobación → tienda y bot comercial.
 
 ## Product Purpose
 
-Página de comercio de Angibell Creaciones: catálogo completo de prendas para niñas 0–14, recepción de nuevas publicaciones subidas por Paperclip vía API, aprobación humana de la propietaria y control de almacén real sobre ERPNext. Éxito = la demo del domingo muestra ese recorrido completo sin promesas falsas.
+Página de comercio de Angibell Creaciones: catálogo de prendas para niñas 0–14, recepción de publicaciones por API, aprobación humana y conexión al motor comercial local. Éxito = la demo muestra el recorrido completo y separa claramente los datos del demo de las integraciones de producción.
 
 ## Positioning
 
-Un catálogo vivo conectado a un almacén real: cada prenda existe como artículo con stock verificable en ERPNext, y los agentes (Paperclip) alimentan publicaciones que la propietaria aprueba. Ni el modelo ni la página deciden precios o stock; el sistema valida y audita.
+Un catálogo vivo conectado a un motor comercial de demostración: la propietaria aprueba productos, el backend valida precio e inventario y prepara borradores de Meta. Paperclip puede aportar publicaciones, pero no autoriza su publicación externa.
 
 ## Operating Context
 
 - Hackathon Conti MIPYME 2026 (SORYNTEL); la demo cierra el domingo.
-- Todo corre en Docker local (página + ERPNext); sin despliegue público todavía.
+- Todo corre local en Docker (página + API + PostgreSQL); no requiere ERPNext.
 - Paperclip (equipo de agentes Codex de la PC del equipo) se conecta por HTTP con `X-API-Key` para subir publicaciones.
 - Las fotos reales de productos llegarán por lotes de 4 durante el desarrollo; hasta entonces hay material sintético etiquetado.
 - Precios en soles (PEN), guardados en céntimos. Pagos reales fuera del alcance de la demo.
@@ -36,8 +36,8 @@ Un catálogo vivo conectado a un almacén real: cada prenda existe como artícul
 
 - Catálogo con variantes por talla, stock por variante, fotos, descripción y precio.
 - Publicaciones entrantes con estado pendiente → aprobar/rechazar en el panel; log de auditoría de cada entrada.
-- Control de almacén en ERPNext (artículos, recepciones de material, disponibilidad); si el ERP no responde, la página usa el último stock conocido y lo declara.
-- La IA interpreta; el sistema valida. Sin pagos reales ni publicación externa automática.
+- Stock por variantes, reservas de venta y pagos simulados en PostgreSQL compartido por API y tienda.
+- La IA interpreta; el sistema valida. Sin pagos reales; la publicación externa en Meta queda desactivada por defecto.
 - Sin push, merge ni despliegue sin revisión humana (regla del plan v2).
 
 ## Brand Commitments
@@ -57,8 +57,8 @@ Un catálogo vivo conectado a un almacén real: cada prenda existe como artícul
 1. Aprobar antes de publicar: la revisión de la propietaria es una función, no un obstáculo.
 2. Ningún dato inventado: sin stock o foto real, se declara la ausencia o el material sintético.
 3. La IA propone; el sistema valida (precios, stock, permisos) y todo queda auditado.
-4. Un solo comando levanta todo (Docker Compose); la demo no depende de pasos manuales frágiles.
-5. El almacén es la verdad operativa; la página es la vitrina.
+4. Un solo comando levanta PostgreSQL, la tienda y API del demo; servicios externos siguen siendo opcionales.
+5. El backend comercial valida reservas y pedidos; la página presenta el catálogo y el panel.
 
 ## Accessibility & Inclusion
 

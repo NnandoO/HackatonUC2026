@@ -1,0 +1,62 @@
+import fs from 'node:fs';
+if (fs.existsSync('.env')) {
+  try { process.loadEnvFile('.env'); } catch (e) {}
+}
+if (fs.existsSync('.env.meta')) {
+  try { process.loadEnvFile('.env.meta'); } catch (e) {}
+}
+
+import { db } from './database/db.js';
+import { createServer } from './server.js';
+import { runSeed } from './seed.js';
+import { wppConnectService } from './services/wppconnect.service.js';
+
+const PORT = Number(process.env.PORT) || 4000;
+const HOST = process.env.HOST || '0.0.0.0';
+
+async function bootstrap() {
+    await db.init();
+    try {
+        await runSeed();
+    } catch (err) {
+        console.error('Advertencia durante seed:', err);
+    }
+
+    // WhatsApp bridge is opt-in; the local demo API must not connect to a real account.
+    if (process.env.WHATSAPP_BRIDGE_ENABLED === 'true') {
+        try {
+            wppConnectService.startPolling();
+        } catch (err) {
+            console.error('Advertencia iniciando WppConnect polling:', err);
+        }
+    } else {
+        console.log('Puente de WhatsApp desactivado (WHATSAPP_BRIDGE_ENABLED != true).');
+    }
+
+    const server = createServer();
+    server.listen(PORT, HOST, () => {
+        console.log(`===============================================`);
+        console.log(`🚀 ANGIBELL 360 API escuchando en http://${HOST}:${PORT}`);
+        console.log(`Endpoints base:`);
+        console.log(`• Health:     http://${HOST}:${PORT}/v1/health`);
+        console.log(`• QR WhatsApp:http://${HOST}:${PORT}/qr`);
+        console.log(`• Catálogo:   http://${HOST}:${PORT}/v1/products`);
+        console.log(`• Pedidos:    http://${HOST}:${PORT}/v1/orders`);
+        console.log(`• Chatbot:    http://${HOST}:${PORT}/v1/conversations`);
+        console.log(`• Admin:      http://${HOST}:${PORT}/v1/admin/products`);
+        console.log(`===============================================`);
+    });
+
+    process.on('SIGTERM', () => {
+        console.log('Cerrando servidor API...');
+        server.close(async () => {
+            await db.close().catch(() => {});
+            process.exit(0);
+        });
+    });
+}
+
+bootstrap().catch((err) => {
+    console.error('Error fatal al iniciar ANGIBELL 360 API:', err);
+    process.exit(1);
+});

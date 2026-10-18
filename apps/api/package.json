@@ -1,0 +1,13 @@
+{
+  "name": "@angibell/api",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node src/main.js",
+    "test": "node --test --test-concurrency=1 src/api.test.js src/qa-integration.test.js"
+  },
+  "dependencies": {
+    "pg": "8.23.0"
+  }
+}
