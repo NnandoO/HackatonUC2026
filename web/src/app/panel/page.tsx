@@ -27,6 +27,9 @@ import { Aprobaciones, type Pendiente } from "./aprobaciones";
 import { AlmacenManual, type PiezaAlmacen } from "./almacen-manual";
 import { LogoutButton } from "./logout-button";
 import { PanelLogin } from "./panel-login";
+import { VentasPendientes, type VentaPendiente } from "./ventas-pendientes";
+import { coreApiFetch } from "@/lib/core-api";
+import { BorradoresMeta, type BorradorMeta, type ConexionesMeta } from "./borradores-meta";
 
 export const dynamic = "force-dynamic";
 
@@ -75,9 +78,33 @@ export default async function PanelPage() {
   const registro = listPublications(20);
   const enAprobacion = todos.filter((p) => p.status === "pendiente").length;
   const publicados = todos.filter((p) => p.status === "publicado").length;
+  let ventasPendientes: VentaPendiente[] = [];
+  let errorVentas: string | null = null;
+  try {
+    const response = await coreApiFetch("/v1/admin/sales-requests?limit=50", { admin: true });
+    const result = await response.json() as { items?: VentaPendiente[]; error?: { message?: string } };
+    if (!response.ok) throw new Error(result.error?.message || `API respondió ${response.status}`);
+    ventasPendientes = result.items ?? [];
+  } catch (error) {
+    errorVentas = error instanceof Error ? error.message : "API comercial no disponible";
+  }
+  let borradoresMeta: BorradorMeta[] = [];
+  let conexionesMeta: ConexionesMeta | null = null;
+  let errorMeta: string | null = null;
+  try {
+    const response = await coreApiFetch("/v1/admin/social-drafts?limit=50", { admin: true });
+    const result = await response.json() as { items?: BorradorMeta[]; connections?: ConexionesMeta; error?: { message?: string } };
+    if (!response.ok) throw new Error(result.error?.message || `API respondió ${response.status}`);
+    borradoresMeta = result.items ?? [];
+    conexionesMeta = result.connections ?? null;
+  } catch (error) {
+    errorMeta = error instanceof Error ? error.message : "API comercial no disponible";
+  }
 
   const secciones = [
+    { href: "#ventas", nombre: "Ventas por validar", n: ventasPendientes.length },
     { href: "#por-aprobar", nombre: "Por aprobar", n: enAprobacion },
+    { href: "#meta", nombre: "Meta por revisar", n: borradoresMeta.length },
     { href: "#catalogo", nombre: "Catálogo", n: todos.length },
     { href: "#almacen", nombre: "Almacén", n: publicados },
     { href: "#registro", nombre: "Registro", n: registro.length },
@@ -150,6 +177,25 @@ export default async function PanelPage() {
         </nav>
 
         <div className="mt-10 space-y-10">
+          <section id="ventas" className="scroll-mt-8">
+            <Card className="border-[1.5px] border-tinta bg-card shadow-papel">
+              <CardHeader>
+                <CardTitle className="flex flex-wrap items-center gap-3 font-display text-[26px]">
+                  Ventas por validar
+                  <Badge className="rotulo border-[1.5px] border-tinta bg-tiza text-[10px] text-tinta">
+                    {ventasPendientes.length} pendientes
+                  </Badge>
+                </CardTitle>
+                <CardDescription>
+                  Confirma personalmente stock, fecha y costo de envío. El pago de prueba solo se prepara después de tu aprobación.
+                </CardDescription>
+              </CardHeader>
+              <CardContent>
+                <VentasPendientes ventas={ventasPendientes} error={errorVentas} />
+              </CardContent>
+            </Card>
+          </section>
+
           <section id="por-aprobar" className="scroll-mt-8">
             <Card className="border-[1.5px] border-tinta bg-card shadow-papel">
               <CardHeader>
@@ -167,6 +213,25 @@ export default async function PanelPage() {
               </CardHeader>
               <CardContent>
                 <Aprobaciones pendientes={pendientes} />
+              </CardContent>
+            </Card>
+          </section>
+
+          <section id="meta" className="scroll-mt-8">
+            <Card className="border-[1.5px] border-tinta bg-card shadow-papel">
+              <CardHeader>
+                <CardTitle className="flex flex-wrap items-center gap-3 font-display text-[26px]">
+                  Publicaciones para revisar
+                  <Badge className="rotulo border-[1.5px] border-tinta bg-tiza text-[10px] text-tinta">
+                    {borradoresMeta.length} preparadas
+                  </Badge>
+                </CardTitle>
+                <CardDescription>
+                  Los borradores quedan listos para revisión. La publicación externa requiere habilitación explícita, credenciales y una imagen con URL HTTPS pública.
+                </CardDescription>
+              </CardHeader>
+              <CardContent>
+                <BorradoresMeta borradores={borradoresMeta} error={errorMeta} conexiones={conexionesMeta} />
               </CardContent>
             </Card>
           </section>

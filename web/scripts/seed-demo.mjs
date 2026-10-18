@@ -13,13 +13,16 @@ const BASE = process.argv[2] ?? "http://localhost:3000";
 const ROOT = path.resolve(path.dirname(new URL(import.meta.url).pathname), "..");
 
 function envLocal(key) {
-  try {
-    const txt = readFileSync(path.join(ROOT, ".env.local"), "utf8");
-    const line = txt.split("\n").find((l) => l.startsWith(`${key}=`));
-    return line ? line.slice(key.length + 1).trim() : null;
-  } catch {
-    return null;
+  for (const file of [".env.local", ".env"]) {
+    try {
+      const txt = readFileSync(path.join(ROOT, file), "utf8");
+      const line = txt.split("\n").find((l) => l.startsWith(`${key}=`));
+      if (line) return line.slice(key.length + 1).trim();
+    } catch {
+      // Try the next local environment file.
+    }
   }
+  return null;
 }
 
 const API_KEY = process.env.PAPERCLIP_API_KEY ?? envLocal("PAPERCLIP_API_KEY");

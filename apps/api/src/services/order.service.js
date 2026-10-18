@@ -1,7 +1,7 @@
 import crypto from 'node:crypto';
 import { db } from '../database/db.js';
 export class OrderService {
-    createOrder(input, actorId) {
+    createOrder(input, actorId, options = {}) {
         if (!input.items || input.items.length === 0 || input.items.length > 50) {
             throw new Error('INVALID_INPUT: El pedido debe contener entre 1 y 50 líneas.');
         }
@@ -22,7 +22,7 @@ export class OrderService {
         const nowIso = now.toISOString();
         // Sort variant IDs lexicographically to avoid deadlocks
         const sortedItems = [...input.items].sort((a, b) => a.variantId.localeCompare(b.variantId));
-        return db.transaction(() => {
+        const create = () => {
             let subtotalCents = 0;
             const orderLines = [];
             for (const item of sortedItems) {
@@ -88,7 +88,8 @@ export class OrderService {
                 reservationExpiresAt,
                 createdAt: nowIso,
             };
-        });
+        };
+        return options.withinTransaction ? create() : db.transaction(create);
     }
     getOrderById(id, actorId, isAdmin = false) {
         // Release any expired pending orders on lookup

@@ -7,6 +7,7 @@ export type ProductSource = "manual" | "paperclip";
 
 export type Variant = {
   id: number;
+  coreId: string | null;
   productId: number;
   size: string;
   color: string;
@@ -18,6 +19,7 @@ export type Variant = {
 
 export type Product = {
   id: number;
+  coreId: string | null;
   slug: string;
   name: string;
   description: string;
@@ -79,6 +81,7 @@ export function getDb(): DatabaseSync {
       category TEXT NOT NULL DEFAULT '',
       colors TEXT NOT NULL DEFAULT '[]',
       image_urls TEXT NOT NULL DEFAULT '[]',
+      core_id TEXT,
       status TEXT NOT NULL DEFAULT 'pendiente',
       source TEXT NOT NULL DEFAULT 'manual',
       created_at TEXT NOT NULL DEFAULT (datetime('now')),
@@ -93,6 +96,7 @@ export function getDb(): DatabaseSync {
       stock_cache INTEGER,
       erpnext_item_code TEXT,
       erpnext_receipted INTEGER NOT NULL DEFAULT 0,
+      core_id TEXT,
       UNIQUE (product_id, size, color)
     );
     CREATE TABLE IF NOT EXISTS publications (
@@ -110,6 +114,13 @@ export function getDb(): DatabaseSync {
   const productCols = db.prepare("PRAGMA table_info(products)").all() as Row[];
   if (!productCols.some((c) => String(c.name) === "compare_at_cents")) {
     db.exec("ALTER TABLE products ADD COLUMN compare_at_cents INTEGER");
+  }
+  if (!productCols.some((c) => String(c.name) === "core_id")) {
+    db.exec("ALTER TABLE products ADD COLUMN core_id TEXT");
+  }
+  const variantCols = db.prepare("PRAGMA table_info(variants)").all() as Row[];
+  if (!variantCols.some((c) => String(c.name) === "core_id")) {
+    db.exec("ALTER TABLE variants ADD COLUMN core_id TEXT");
   }
   g.__angibellDb = db;
   return db;
@@ -130,6 +141,7 @@ type Row = Record<string, unknown>;
 function variantFromRow(r: Row): Variant {
   return {
     id: Number(r.id),
+    coreId: r.core_id == null ? null : String(r.core_id),
     productId: Number(r.product_id),
     size: String(r.size),
     color: String(r.color ?? ""),
@@ -143,6 +155,7 @@ function variantFromRow(r: Row): Variant {
 function productFromRow(r: Row, variants: Variant[]): Product {
   return {
     id: Number(r.id),
+    coreId: r.core_id == null ? null : String(r.core_id),
     slug: String(r.slug),
     name: String(r.name),
     description: String(r.description ?? ""),
@@ -253,6 +266,24 @@ export function listProducts(opts: { status?: ProductStatus; limit?: number } = 
 export function setProductStatus(id: number, status: ProductStatus): void {
   const db = getDb();
   db.prepare("UPDATE products SET status = ?, updated_at = datetime('now') WHERE id = ?").run(status, id);
+}
+
+export function setCoreProductMapping(
+  productId: number,
+  coreProductId: string,
+  variants: Array<{ id: number; coreId: string }>,
+): void {
+  const db = getDb();
+  db.exec("BEGIN IMMEDIATE");
+  try {
+    db.prepare("UPDATE products SET core_id = ? WHERE id = ?").run(coreProductId, productId);
+    const update = db.prepare("UPDATE variants SET core_id = ? WHERE id = ? AND product_id = ?");
+    for (const variant of variants) update.run(variant.coreId, variant.id, productId);
+    db.exec("COMMIT");
+  } catch (error) {
+    db.exec("ROLLBACK");
+    throw error;
+  }
 }
 
 export function setVariantDeclaredStock(variantId: number, stock: number): void {

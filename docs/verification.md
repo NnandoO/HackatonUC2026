@@ -1,4 +1,6 @@
-# Evidencia de base
+# Evidencia histórica de la base de contratos
+
+Este archivo registra una verificación inicial anterior al demo ejecutable y no representa el estado actual. Para el estado y límites vigentes, consulta `README.md`, `apps/api/README.md` y `docs/acceptance.md`.
 
 - Rama: paperclip/coordinador; git status inicial limpio.
 - Leídos AGENTS.md y PLAN-ANGIBELL360.md completos.

@@ -3,6 +3,7 @@ import { createProduct, listPublications, recordPublication, type VariantInput }
 import { getErpnextConfig, syncProduct } from "@/lib/erpnext";
 import { approveProduct } from "@/lib/flow";
 import { toPublicProduct } from "@/lib/public";
+import { syncApprovedProductToCore } from "@/lib/core-catalog";
 
 export const dynamic = "force-dynamic";
 
@@ -119,6 +120,14 @@ export async function POST(req: Request) {
       { status: 201 }
     );
   }
+  try {
+    await syncApprovedProductToCore(product);
+  } catch (e) {
+    return Response.json(
+      { id: product.id, slug: product.slug, estado: "pendiente", error: `No se pudo sincronizar el producto: ${String(e instanceof Error ? e.message : e)}` },
+      { status: 502 },
+    );
+  }
   const outcome = await approveProduct(product.id);
   if (outcome.sync === null) {
     const cfg = await getErpnextConfig();
@@ -154,5 +163,3 @@ export async function GET(req: Request) {
   if (denied) return denied;
   return Response.json({ publicaciones: listPublications(50) });
 }
-
-export { toPublicProduct };

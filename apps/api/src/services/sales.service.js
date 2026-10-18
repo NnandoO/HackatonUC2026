@@ -59,7 +59,7 @@ export class SalesService {
       }));
   }
 
-  approveRequest(id, adminActorId, approval) {
+  approveRequest(id, adminActorId, approval, requestId = crypto.randomUUID()) {
     const shippingCents = Number(approval.shippingCents);
     const deliveryDate = String(approval.deliveryDate || '').trim();
     const parsedDate = new Date(`${deliveryDate}T12:00:00Z`);
@@ -85,38 +85,59 @@ export class SalesService {
         throw new Error('CONFLICT: Cambió el precio del catálogo. Prepara una nueva solicitud para validación.');
       }
     }
-    const items = requestedItems.map(({ variantId, quantity }) => ({ variantId, quantity }));
-    const order = orderService.createOrder({ items, channel: request.conversation_id ? 'whatsapp' : 'web',
-      deliveryZoneId: request.delivery_method === 'pickup' ? 'pickup' : request.delivery_zone,
-      shippingCents }, request.actor_id);
-    const payment = paymentService.createPayment(order.id, request.actor_id, 'simulated');
-    const now = new Date().toISOString();
-    db.execute(`UPDATE sales_requests SET status = 'approved', approved_date = ?, shipping_cents = ?, order_id = ?, reviewed_at = ?
-      WHERE id = ? AND status = 'pending'`, [deliveryDate, shippingCents, order.id, now, id]);
-    db.execute(`INSERT INTO audit_events (id, actor_id, action, entity_id, request_id, changes, created_at)
-      VALUES (?, ?, 'approve_sale', ?, ?, ?, ?)`,
-      [crypto.randomUUID(), adminActorId, id, crypto.randomUUID(), JSON.stringify({ orderId: order.id, deliveryDate, shippingCents }), now]);
-    return { id, status: 'approved', orderId: order.id, totalCents: order.total.amountCents,
-      deliveryDate, shippingCents, checkoutUrl: payment.checkoutUrl };
+    return db.transaction(() => {
+      const currentRequest = db.queryOne(`SELECT * FROM sales_requests WHERE id = ? AND status = 'pending'`, [id]);
+      if (!currentRequest) throw new Error('CONFLICT: Solicitud ya revisada.');
+      const currentItems = JSON.parse(currentRequest.items_json);
+      for (const item of currentItems) {
+        const current = db.queryOne(`SELECT price_cents FROM variants WHERE id = ?`, [item.variantId]);
+        if (!current || current.price_cents !== item.priceCents) {
+          throw new Error('CONFLICT: Cambió el precio del catálogo. Prepara una nueva solicitud para validación.');
+        }
+      }
+      const items = currentItems.map(({ variantId, quantity }) => ({ variantId, quantity }));
+      const order = orderService.createOrder({
+        items,
+        channel: currentRequest.conversation_id ? 'whatsapp' : 'web',
+        deliveryZoneId: currentRequest.delivery_method === 'pickup' ? 'pickup' : currentRequest.delivery_zone,
+        shippingCents,
+      }, currentRequest.actor_id, { withinTransaction: true });
+      const payment = paymentService.createPayment(order.id, currentRequest.actor_id, 'simulated', { withinTransaction: true });
+      const now = new Date().toISOString();
+      const updated = db.execute(`UPDATE sales_requests SET status = 'approved', approved_date = ?, shipping_cents = ?, order_id = ?, reviewed_at = ?
+        WHERE id = ? AND status = 'pending'`, [deliveryDate, shippingCents, order.id, now, id]);
+      if (updated.changes !== 1) throw new Error('CONFLICT: Solicitud ya revisada.');
+      db.execute(`INSERT INTO audit_events (id, actor_id, action, entity_id, request_id, changes, created_at)
+        VALUES (?, ?, 'approve_sale', ?, ?, ?, ?)`,
+        [crypto.randomUUID(), adminActorId, id, requestId, JSON.stringify({ orderId: order.id, deliveryDate, shippingCents }), now]);
+      return { id, status: 'approved', orderId: order.id, totalCents: order.total.amountCents,
+        deliveryDate, shippingCents, checkoutUrl: payment.checkoutUrl };
+    });
   }
 
-  rejectRequest(id, adminActorId, reason) {
+  rejectRequest(id, adminActorId, reason, requestId = crypto.randomUUID()) {
     const admin = db.queryOne(`SELECT id FROM actors WHERE id = ? AND role = 'admin'`, [adminActorId]);
     if (!admin) throw new Error('FORBIDDEN: Solo la administradora puede rechazar ventas.');
-    const request = db.queryOne(`SELECT id, status FROM sales_requests WHERE id = ?`, [id]);
-    if (!request) throw new Error('NOT_FOUND: Solicitud de venta no encontrada.');
-    if (request.status !== 'pending') throw new Error('CONFLICT: Solicitud ya revisada.');
     const reviewedReason = String(reason || '').trim().slice(0, 300);
     if (!reviewedReason) throw new Error('INVALID_INPUT: Indica el motivo del rechazo.');
-    const now = new Date().toISOString();
-    db.execute(`UPDATE sales_requests SET status = 'rejected', reviewed_at = ? WHERE id = ? AND status = 'pending'`, [now, id]);
-    db.execute(`INSERT INTO audit_events (id, actor_id, action, entity_id, request_id, changes, created_at)
-      VALUES (?, ?, 'reject_sale', ?, ?, ?, ?)`,
-      [crypto.randomUUID(), adminActorId, id, crypto.randomUUID(), JSON.stringify({ reason: reviewedReason }), now]);
-    return { id, status: 'rejected', reason: reviewedReason };
+    return db.transaction(() => {
+      const request = db.queryOne(`SELECT id, status FROM sales_requests WHERE id = ?`, [id]);
+      if (!request) throw new Error('NOT_FOUND: Solicitud de venta no encontrada.');
+      if (request.status !== 'pending') throw new Error('CONFLICT: Solicitud ya revisada.');
+      const now = new Date().toISOString();
+      const updated = db.execute(`UPDATE sales_requests SET status = 'rejected', reviewed_at = ? WHERE id = ? AND status = 'pending'`, [now, id]);
+      if (updated.changes !== 1) throw new Error('CONFLICT: Solicitud ya revisada.');
+      db.execute(`INSERT INTO audit_events (id, actor_id, action, entity_id, request_id, changes, created_at)
+        VALUES (?, ?, 'reject_sale', ?, ?, ?, ?)`,
+        [crypto.randomUUID(), adminActorId, id, requestId, JSON.stringify({ reason: reviewedReason }), now]);
+      return { id, status: 'rejected', reason: reviewedReason };
+    });
   }
 
   async notifyAdmin(request) {
+    if (process.env.WHATSAPP_BRIDGE_ENABLED !== 'true') {
+      return { sent: false, reason: 'whatsapp_bridge_disabled' };
+    }
     const adminPhone = process.env.SALES_ADMIN_PHONE || '51995992450';
     const { wppConnectService } = await import('./wppconnect.service.js');
     const summary = request.items.map(item => `${item.name} (${item.sku}) ×${item.quantity}`).join(', ');
@@ -127,6 +148,9 @@ export class SalesService {
   }
 
   async notifyCustomer(id) {
+    if (process.env.WHATSAPP_BRIDGE_ENABLED !== 'true') {
+      return { sent: false, reason: 'whatsapp_bridge_disabled' };
+    }
     const row = db.queryOne(`SELECT s.*, a.phone FROM sales_requests s JOIN actors a ON a.id = s.actor_id WHERE s.id = ?`, [id]);
     if (!row || row.status !== 'approved' || row.notification_sent_at || !row.phone) return { sent: false };
     const { wppConnectService } = await import('./wppconnect.service.js');

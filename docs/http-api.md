@@ -1,5 +1,7 @@
 # HTTP v1
 
+Este documento define el contrato objetivo; no es un inventario de rutas actualmente implementadas. La API del demo está descrita en `apps/api/README.md`. En particular, el simulador Culqi actual no valida firma y no puede usarse como pago real.
+
 JSON UTF-8; DTO de packages/contracts/src/index.ts es fuente de nombres y estados. Respuestas directas, errores ApiError; requestId generado por servidor. UUID y fechas se validan; precios no usan floats. Listados Page<T>, limit 1–50 (default 20), cursor opaco por createdAt/id, nextCursor null al terminar. CORS solo origen web autorizado. Idempotency-Key obligatorio en POST internos (incluye mensajes); webhooks usan IDs externos. Sesiones: public=lectura catálogo; customer=sesión opaca vinculada; admin=sesión y permiso de administrador. Todos los recursos privados se filtran por actor, 404 para recurso ajeno.
 
 | Método/ruta | Acceso | Entrada | Éxito |
@@ -22,7 +24,7 @@ JSON UTF-8; DTO de packages/contracts/src/index.ts es fuente de nombres y estado
 | GET /v1/admin/social-drafts | admin | ?limit&cursor | 200 Page<SocialDraft> |
 | GET /v1/webhooks/whatsapp | Meta | parámetros oficiales de desafío | 200 desafío solo con token verificado; 403 si inválido |
 | POST /v1/webhooks/whatsapp | firma Meta verificada | raw bytes oficiales | 202 {received:true}; duplicado 200 |
-| POST /v1/webhooks/culqi | adaptador Culqi verificado | raw bytes oficiales | 202 {received:true}; duplicado 200 |
+| POST /v1/webhooks/culqi | adaptador Culqi verificado | raw bytes oficiales | Objetivo futuro; el endpoint actual solo simula pagos y no acepta firma oficial |
 
 Admin panel no dispone de login ficticio público: sesión admin provisionada localmente por operador hasta implementar autenticación revisada. Adaptador WhatsApp crea conversaciones internas según remitente verificado; no usa role del mensaje. Mensaje administrativo con foto prepara ProductInput para validación y creación de draft por herramienta autorizada; luego Proposal publish_product. Cliente no puede acceder a herramientas admin. Imagen pendiente/ambigua o pedido a medida produce handoff=true. MessageResult.orderId solo tras confirmación explícita del cliente y creación por backend; mensajes de IA no acreditan pago.
 

@@ -1,10 +1,10 @@
 # Criterios de aceptación y revisión
 
-Base: pnpm install --frozen-lockfile, pnpm check y pnpm typecheck exitosos; imports compartidos sin duplicar DTO. apps/web y apps/api son carpetas reservadas: no hay servicios ejecutables ni compilación Next/Nest en esta entrega.
+Alcance: estos son criterios de aceptación de producción; no describen el estado ya alcanzado por el demo. El demo actual sí tiene tienda Next.js, API Node.js/SQLite, panel de ventas y borradores Meta. `apps/api` no es NestJS y no usa PostgreSQL; `web/` mantiene su catálogo SQLite separado. La integración de las dos bases es parcial.
 
 Backend: migraciones reproducibles PostgreSQL con constraints; validar entrada y propiedad de recursos; dos pedidos concurrentes por una unidad producen un solo ganador; fallo de una línea revierte toda reserva. Duplicar petición devuelve mismo pedido; distinta carga con misma key da 409. Expiración repetida libera una vez; set_stock debajo de reservado se rechaza. Pago duplicado se aplica una vez; firma falsa/importe/moneda/cuenta incorrecta no confirma pedido. Carrera webhook-expirador no causa stock negativo; pago tardío se deriva a conciliación. Cliente ajeno y rol admin falsificado no acceden. Propuesta expirada, actor distinto y versión obsoleta no mutan datos; confirmación válida produce una auditoría y un outbox.
 
-Frontend: impeccable y evidencia renderizada móvil/escritorio. Catálogo, detalle, tallas/color, errores de stock, estado de reserva y pedido, pago claramente SIMULADO o SANDBOX. Panel muestra borradores/propuestas y exige confirmación. Ningún redirect confirma pago. Accesibilidad teclado, labels y foco; no datos privados en bundle.
+Frontend: impeccable y evidencia renderizada móvil/escritorio. Catálogo, detalle, tallas/color, errores de stock, estado de reserva y pedido, pago claramente SIMULADO o SANDBOX. Panel muestra borradores/propuestas y exige confirmación. La publicación externa en Meta debe permanecer desactivada por defecto. Ningún redirect confirma pago. Accesibilidad teclado, labels y foco; no datos privados en bundle.
 
 Integraciones: foto/mensaje controlado → borrador → confirmación admin → producto publicado local → borrador Meta → conversación comercial → confirmación cliente → pedido reservado → enlace simulado/prueba. Probar deduplicación de mensajes/jobs y fallo de proveedor. Mostrar derivación humana para medidas personalizadas. Evidencia de sesión keyring no acredita respuesta agy ni integración Meta/Culqi real.
 

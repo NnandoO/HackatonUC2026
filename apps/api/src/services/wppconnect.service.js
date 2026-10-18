@@ -6,7 +6,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-export const MEDIA_DIR = path.resolve(__dirname, '../../../../.state/media');
+export const MEDIA_DIR = process.env.MEDIA_DIR || path.resolve(__dirname, '../../../../.state/media');
 const MAX_IMAGE_BYTES = 8 * 1024 * 1024;
 const IMAGE_EXTENSIONS = new Map([
   ['image/jpeg', 'jpg'],
@@ -15,7 +15,7 @@ const IMAGE_EXTENSIONS = new Map([
 ]);
 
 const WPP_BASE_URL = process.env.WPPCONNECT_BASE_URL || 'http://127.0.0.1:21465';
-const SECRET_KEY = process.env.WPPCONNECT_SECRET_KEY || 'f3d03d5856e6ab6b5a200ec5448bf7ba9a354870fafc74fc';
+const getSecretKey = () => process.env.WPPCONNECT_SECRET_KEY?.trim() || '';
 const SESSION_NAME = 'angibell';
 const getGroqApiKey = () => process.env.GROQ_API_KEY || '';
 
@@ -66,8 +66,10 @@ export class WppConnectService {
 
   async getToken() {
     if (this.token) return this.token;
+    const secretKey = getSecretKey();
+    if (!secretKey) return null;
     try {
-      const res = await fetch(`${WPP_BASE_URL}/api/${SESSION_NAME}/${SECRET_KEY}/generate-token`, {
+      const res = await fetch(`${WPP_BASE_URL}/api/${SESSION_NAME}/${encodeURIComponent(secretKey)}/generate-token`, {
         method: 'POST'
       });
       const data = await res.json();
@@ -486,8 +488,12 @@ export class WppConnectService {
   }
 
   connectSocketListener() {
-    const wsUrl = 'ws://127.0.0.1:21465/socket.io/?EIO=4&transport=websocket';
     try {
+      const baseUrl = new URL(WPP_BASE_URL);
+      baseUrl.protocol = baseUrl.protocol === 'https:' ? 'wss:' : 'ws:';
+      baseUrl.pathname = '/socket.io/';
+      baseUrl.search = new URLSearchParams({ EIO: '4', transport: 'websocket' }).toString();
+      const wsUrl = baseUrl.toString();
       this.ws = new WebSocket(wsUrl);
 
       this.ws.onopen = () => {

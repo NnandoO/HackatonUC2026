@@ -6,15 +6,17 @@ Plataforma de comercio electrónico con automatización comercial para **Angibel
 
 **Recorrido demo (hackathon):** foto por WhatsApp → producto preparado → confirmación de la propietaria → aparece en la tienda → publicación para Meta preparada → cliente conversa con el bot → pedido + enlace de pago de prueba.
 
-## Stack
+## Stack del demo actual
 
 - **Next.js + TypeScript** — tienda virtual y panel administrable
-- **NestJS + TypeScript** — servicios comerciales (precios, inventario, pedidos, pagos)
-- **PostgreSQL** — datos de negocio
-- **BullMQ** — colas y trabajos en segundo plano
-- **WhatsApp Cloud API (Meta)** — asistentes administrativo y comercial
-- **Meta API** — catálogo y publicaciones · **Culqi** — pagos
-- **Docker + AWS Lightsail + Cloudflare** — despliegue, DNS y protección
+- **API Node.js HTTP + `node:sqlite`** — catálogo comercial, reservas, pedidos, propuestas y pagos simulados; no es NestJS ni PostgreSQL.
+- **SQLite** — datos persistentes del demo. La tienda conserva su propio catálogo local y sincroniza productos/stock aprobados con la API comercial.
+- **ERPNext v16 opcional** — almacén de respaldo levantado por separado; no comparte transacciones de reservas con la API comercial.
+- **WPPConnect opcional** — puente de demostración; la WhatsApp Cloud API oficial tiene webhook con firma, pero requiere credenciales externas.
+- **Facebook/Instagram** — borradores y flujo de aprobación preparados; publicar fuera del demo está desactivado por defecto.
+- **Culqi** — aún no conectado; el demo genera pagos simulados.
+
+El destino de producción definido por el plan sigue siendo Next.js + NestJS + PostgreSQL + BullMQ. No se debe describir como implementado hasta migrar y verificar esos componentes.
 
 ## Documentos
 
@@ -24,6 +26,29 @@ Plataforma de comercio electrónico con automatización comercial para **Angibel
 ## Equipo
 
 SORYNTEL — Conti MIPYME Hackathon 2026.
+
+## Demo local disponible
+
+La tienda y el motor comercial pueden ejecutarse juntos desde `web/`:
+
+```sh
+bash scripts/start-demo.sh
+```
+
+La web queda en `http://localhost:3000`; el chat de demostración está en
+`/simulator` y el panel de administración en `/panel`. La API comercial solo
+queda accesible desde el propio equipo en `localhost:4000`. El puente de
+WhatsApp inicia desactivado. Para respuestas generadas por IA se debe agregar
+`OPENROUTER_API_KEY` a `web/.env`; sin esa clave, el proveedor no podrá responder.
+El script crea claves locales aleatorias para el panel, Paperclip y el ERP. Las credenciales se guardan en `web/.env`; no compartir ese archivo.
+
+Al aprobar una publicación en el panel, el producto pasa también al catálogo
+del motor comercial, queda preparado un texto para Meta y aparece en el chat de
+demo. Las ventas llegan al panel para que Angibell confirme stock, fecha y
+envío; solo después se genera el enlace de pago simulado. La publicación externa
+requiere activar `META_PUBLISH_ENABLED=true`, credenciales y una URL HTTPS
+pública para las imágenes; consulta `web/secrets/README.md`. Culqi real y el
+despliegue público todavía requieren integración y verificación.
 
 ## Base de contratos v1
 
@@ -39,8 +64,8 @@ pnpm check
 pnpm typecheck
 ```
 
-`apps/web` y `apps/api` están reservados para los especialistas; esta base no
-arranca tienda, API ni infraestructura. PostgreSQL y Redis se configurarán en
-la entrega backend, sin credenciales en Git. La demo será simulada por defecto.
-La incorporación local del commit inicial está autorizada; integrar ramas de
-implementación, publicar o desplegar requiere revisión humana SORYNTEL.
+La tienda y API de demostración descritas arriba ya pueden ejecutarse juntas.
+`apps/api` es un prototipo Node.js con SQLite; `web/` usa SQLite para su propio
+catálogo. El plan de producción mantiene NestJS, PostgreSQL y Redis como destino.
+No guardar credenciales en Git. La integración local se hace en una rama
+revisable; no implica push ni despliegue.

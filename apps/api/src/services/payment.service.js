@@ -2,9 +2,9 @@ import crypto from 'node:crypto';
 import { db } from '../database/db.js';
 import { orderService } from './order.service.js';
 export class PaymentService {
-    createPayment(orderId, actorId, mode = 'simulated') {
+    createPayment(orderId, actorId, mode = 'simulated', options = {}) {
         // Sweep any expired reservations first
-        orderService.sweepExpiredReservations();
+        if (!options.withinTransaction) orderService.sweepExpiredReservations();
         const order = db.queryOne(`SELECT * FROM orders WHERE id = ? AND actor_id = ?`, [orderId, actorId]);
         if (!order) {
             throw new Error('NOT_FOUND: Pedido no encontrado.');
