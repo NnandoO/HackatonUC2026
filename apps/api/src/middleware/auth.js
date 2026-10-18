@@ -28,6 +28,14 @@ export function getAuthContext(req) {
      JOIN actors a ON s.actor_id = a.id
      WHERE s.token_hash = ? AND s.expires_at > ?`, [tokenHash, new Date().toISOString()]);
     if (session) {
+        if (session.role === 'admin') {
+            const authorized = db.queryOne(`SELECT phone FROM authorized_admins WHERE actor_id = ? AND active = 1`, [session.actor_id]);
+            if (!authorized) {
+                const actorId = crypto.randomUUID();
+                db.execute(`INSERT INTO actors (id, role, created_at) VALUES (?, 'customer', ?)`, [actorId, new Date().toISOString()]);
+                return { actorId, role: 'customer' };
+            }
+        }
         return {
             actorId: session.actor_id,
             role: session.role,
@@ -54,7 +62,7 @@ export function createCustomerSession(actorId) {
     });
     return { token, expiresAt, actorId: id };
 }
-export function createAdminSession(phone = '+51999888777') {
+export function createAdminSession(phone = '+51995992450') {
     const actorId = crypto.randomUUID();
     const token = `ang_admin_${crypto.randomBytes(24).toString('hex')}`;
     const tokenHash = crypto.createHash('sha256').update(token).digest('hex');

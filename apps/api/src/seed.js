@@ -4,10 +4,12 @@ import { createAdminSession } from './middleware/auth.js';
 import { db } from './database/db.js';
 export function runSeed() {
     console.log('--- Iniciando Seed de Datos ANGIBELL 360 ---');
+    // Revocar el número administrativo usado solo en la demo anterior.
+    db.execute(`UPDATE authorized_admins SET active = 0 WHERE phone = ?`, ['+51999888777']);
     // 1. Create Admin
-    const admin = createAdminSession('+51999888777');
+    const admin = createAdminSession('+51995992450');
     console.log(`Admin creado con ID: ${admin.actorId}`);
-    console.log(`Admin Bearer Token: ${admin.token}`);
+    console.log('Sesión administrativa creada (credencial omitida de los logs).');
     // Check if products already exist
     const existing = catalogService.adminGetProducts({ limit: 1 });
     if (existing.items.length > 0) {

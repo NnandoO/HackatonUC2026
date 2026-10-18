@@ -30,6 +30,7 @@ export class ChatService {
             userRole,
             text: input.text.trim(),
             imageUrls: input.imageUrls || [],
+            storedImageUrls: input.storedImageUrls || [],
             channel: conv.channel
         });
 

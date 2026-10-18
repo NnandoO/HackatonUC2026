@@ -11,12 +11,22 @@ import { orderService } from './services/order.service.js';
 import { paymentService } from './services/payment.service.js';
 import { chatService } from './services/chat.service.js';
 import { socialService } from './services/social.service.js';
+import { salesService } from './services/sales.service.js';
 import { wppConnectService } from './services/wppconnect.service.js';
 import { getAuthContext, createCustomerSession } from './middleware/auth.js';
 import { checkIdempotency, saveIdempotency } from './middleware/idempotency.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
+const MEDIA_DIR = path.resolve(__dirname, '../../../.state/media');
+const MEDIA_TYPES = { jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png', webp: 'image/webp' };
+
+export function verifyMetaSignature(rawBody, signatureHeader, appSecret) {
+    if (!appSecret || typeof signatureHeader !== 'string' || !/^sha256=[a-f0-9]{64}$/i.test(signatureHeader)) return false;
+    const expected = crypto.createHmac('sha256', appSecret).update(rawBody).digest();
+    const provided = Buffer.from(signatureHeader.slice(7), 'hex');
+    return provided.length === expected.length && crypto.timingSafeEqual(provided, expected);
+}
 
 export function sendJson(res, statusCode, data, requestId) {
     const body = JSON.stringify(data);
@@ -78,6 +88,25 @@ export function createServer() {
         const auth = getAuthContext(req);
 
         try {
+            // Fotos cargadas por el administrador. El nombre aleatorio evita enumeración predecible.
+            const mediaMatch = pathname.match(/^\/media\/([a-f0-9-]+\.(?:jpg|jpeg|png|webp))$/i);
+            if (method === 'GET' && mediaMatch) {
+                const filename = mediaMatch[1];
+                const mediaPath = path.join(MEDIA_DIR, filename);
+                if (!fs.existsSync(mediaPath)) {
+                    return sendError(res, 404, 'NOT_FOUND', 'Imagen no encontrada.', requestId);
+                }
+                const extension = path.extname(filename).slice(1).toLowerCase();
+                res.writeHead(200, {
+                    'Content-Type': MEDIA_TYPES[extension],
+                    'Content-Length': fs.statSync(mediaPath).size,
+                    'Cache-Control': 'public, max-age=31536000, immutable',
+                    'X-Content-Type-Options': 'nosniff'
+                });
+                fs.createReadStream(mediaPath).pipe(res);
+                return;
+            }
+
             // 0. GET / or /simulator -> Servir Simulador Web WhatsApp
             if (method === 'GET' && (pathname === '/' || pathname === '/simulator')) {
                 const htmlPath = path.resolve(__dirname, 'simulator.html');
@@ -362,6 +391,27 @@ export function createServer() {
                 return sendJson(res, 200, orders, requestId);
             }
 
+            if (method === 'GET' && pathname === '/v1/admin/sales-requests') {
+                if (auth.role !== 'admin') return sendError(res, 403, 'FORBIDDEN', 'Solo administradora.', requestId);
+                return sendJson(res, 200, { items: salesService.listPending(query.limit) }, requestId);
+            }
+
+            const saleApproveMatch = pathname.match(/^\/v1\/admin\/sales-requests\/([a-zA-Z0-9_-]+)\/approve$/);
+            if (method === 'POST' && saleApproveMatch) {
+                if (auth.role !== 'admin') return sendError(res, 403, 'FORBIDDEN', 'Solo administradora.', requestId);
+                const input = JSON.parse(await readBody(req) || '{}');
+                const result = salesService.approveRequest(saleApproveMatch[1], auth.actorId, input);
+                result.customerNotification = await salesService.notifyCustomer(result.id);
+                return sendJson(res, 200, result, requestId);
+            }
+
+            const saleRejectMatch = pathname.match(/^\/v1\/admin\/sales-requests\/([a-zA-Z0-9_-]+)\/reject$/);
+            if (method === 'POST' && saleRejectMatch) {
+                if (auth.role !== 'admin') return sendError(res, 403, 'FORBIDDEN', 'Solo administradora.', requestId);
+                const input = JSON.parse(await readBody(req) || '{}');
+                return sendJson(res, 200, salesService.rejectRequest(saleRejectMatch[1], auth.actorId, input.reason), requestId);
+            }
+
             // 12. POST /v1/orders/:id/payments
             const payMatch = pathname.match(/^\/v1\/orders\/([a-zA-Z0-9_-]+)\/payments$/);
             if (method === 'POST' && payMatch && payMatch[1]) {
@@ -405,11 +455,21 @@ export function createServer() {
                 return sendJson(res, 200, drafts, requestId);
             }
 
+            // 16.1 POST /v1/admin/social-drafts/:id/publish-instagram
+            const publishInstagramMatch = pathname.match(/^\/v1\/admin\/social-drafts\/([a-zA-Z0-9_-]+)\/publish-instagram$/);
+            if (method === 'POST' && publishInstagramMatch && publishInstagramMatch[1]) {
+                if (auth.role !== 'admin') {
+                    return sendError(res, 403, 'FORBIDDEN', 'Acceso denegado: requiere rol de administrador.', requestId);
+                }
+                const result = await socialService.publishInstagramDraft(publishInstagramMatch[1]);
+                return sendJson(res, 200, result, requestId);
+            }
+
             // 17. Webhooks
             if (method === 'GET' && pathname === '/v1/webhooks/whatsapp') {
                 const verifyToken = query['hub.verify_token'];
                 const challenge = query['hub.challenge'];
-                if (verifyToken === (process.env.WHATSAPP_VERIFY_TOKEN || 'angibell_webhook_secret')) {
+                if (process.env.WHATSAPP_VERIFY_TOKEN && verifyToken === process.env.WHATSAPP_VERIFY_TOKEN) {
                     res.writeHead(200, { 'Content-Type': 'text/plain' });
                     res.end(challenge || 'ok');
                     return;
@@ -419,7 +479,14 @@ export function createServer() {
 
             if (method === 'POST' && pathname === '/v1/webhooks/whatsapp') {
                 const bodyRaw = await readBody(req);
+                if (!verifyMetaSignature(bodyRaw, req.headers['x-hub-signature-256'], process.env.META_APP_SECRET)) {
+                    return sendError(res, 403, 'FORBIDDEN', 'Firma de Meta inválida o no configurada.', requestId);
+                }
                 const payload = JSON.parse(bodyRaw || '{}');
+
+                if (payload.object !== 'whatsapp_business_account') {
+                    return sendError(res, 400, 'INVALID_INPUT', 'Evento de WhatsApp inválido.', requestId);
+                }
 
                 let from = '+51912345678';
                 let text = '';
@@ -434,15 +501,10 @@ export function createServer() {
                         imageUrls.push(`https://meta-media-proxy.angibell.pe/${waMsg.image.id}`);
                     }
                 } 
-                // Caso B: Formato directo simulado
-                else {
-                    from = payload.from || '+51912345678';
-                    text = payload.text || payload.body || '';
-                    imageUrls = payload.imageUrls || [];
-                }
+                else return sendJson(res, 200, { received: true, status: 'ignored' }, requestId);
 
                 // Identificar rol: ¿Es el teléfono de la administradora?
-                const isAdmin = from === '+51999888777' || Boolean(db.queryOne(`SELECT * FROM authorized_admins WHERE phone = ? AND active = 1`, [from]));
+                const isAdmin = Boolean(db.queryOne(`SELECT phone FROM authorized_admins WHERE phone = ? AND active = 1`, [from]));
                 const role = isAdmin ? 'admin' : 'customer';
 
                 // Buscar o registrar actor

@@ -57,6 +57,25 @@ CREATE TABLE IF NOT EXISTS orders (
   created_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS sales_requests (
+  id TEXT PRIMARY KEY,
+  actor_id TEXT NOT NULL REFERENCES actors(id),
+  conversation_id TEXT REFERENCES conversations(id),
+  items_json TEXT NOT NULL,
+  subtotal_cents INTEGER NOT NULL CHECK(subtotal_cents >= 0),
+  delivery_method TEXT NOT NULL CHECK(delivery_method IN ('pickup', 'delivery')),
+  delivery_zone TEXT NOT NULL DEFAULT '',
+  delivery_address TEXT NOT NULL DEFAULT '',
+  requested_date TEXT NOT NULL DEFAULT '',
+  approved_date TEXT,
+  shipping_cents INTEGER,
+  status TEXT NOT NULL CHECK(status IN ('pending', 'approved', 'rejected')),
+  order_id TEXT REFERENCES orders(id),
+  created_at TEXT NOT NULL,
+  reviewed_at TEXT,
+  notification_sent_at TEXT
+);
+
 CREATE TABLE IF NOT EXISTS order_items (
   id TEXT PRIMARY KEY,
   order_id TEXT NOT NULL REFERENCES orders(id) ON DELETE CASCADE,
